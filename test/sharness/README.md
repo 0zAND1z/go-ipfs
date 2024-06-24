@@ -1,4 +1,4 @@
-# ipfs whole tests using the [sharness framework](https://github.com/mlafeldt/sharness/)
+# ipfs whole tests using the [sharness framework](https://github.com/pl-strflt/sharness/tree/feat/junit)
 
 ## Running all the tests
 
@@ -14,6 +14,13 @@ The usual ipfs env flags also apply:
 ```sh
 # the output will make your eyes bleed
 IPFS_LOGGING=debug TEST_VERBOSE=1 make
+```
+
+To make the tests abort as soon as an error occurs, use the TEST_IMMEDIATE env variable:
+
+```sh
+# this will abort as soon the first error occurs
+TEST_IMMEDIATE=1 make
 ```
 
 ## Running just one test
@@ -39,13 +46,13 @@ $ ./t0010-basic-commands.sh -v -i
 
 When running sharness tests from main Makefile or when `test_sharness_deps`
 target is run dependencies for sharness
-will be downloaded from its github repo and installed in a "lib/sharness"
+will be downloaded from its GitHub repo and installed in a "lib/sharness"
 directory.
 
 Please do not change anything in the "lib/sharness" directory.
 
 If you really need some changes in sharness, please fork it from
-[its cannonical repo](https://github.com/mlafeldt/sharness/) and
+[its canonical repo](https://github.com/mlafeldt/sharness/) and
 send pull requests there.
 
 ## Writing Tests
@@ -100,7 +107,7 @@ test_expect_success "'ipfs add --help' succeeds" '
 
 # other tests here...
 
-# dont forget to kill the daemon!!
+# don't forget to kill the daemon!!
 test_kill_ipfs_daemon
 ```
 
@@ -119,6 +126,6 @@ test_mount_ipfs
 
 # tests mounted here
 
-# dont forget to kill the daemon!!
+# don't forget to kill the daemon!!
 test_kill_ipfs_daemon
 ```

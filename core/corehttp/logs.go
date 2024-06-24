@@ -5,8 +5,8 @@ import (
 	"net"
 	"net/http"
 
-	core "github.com/ipfs/go-ipfs/core"
-	lwriter "gx/ipfs/QmRREK2CAZ5Re2Bd9zZFG6FeYDppUWt5cMgsoUEp3ktgSr/go-log/writer"
+	lwriter "github.com/ipfs/go-log/writer"
+	core "github.com/ipfs/kubo/core"
 )
 
 type writeErrNotifier struct {
@@ -50,7 +50,7 @@ func LogOption() ServeOption {
 			w.WriteHeader(200)
 			wnf, errs := newWriteErrNotifier(w)
 			lwriter.WriterGroup.AddWriter(wnf)
-			log.Event(n.Context(), "log API client connected")
+			log.Event(n.Context(), "log API client connected") //nolint deprecated
 			<-errs
 		})
 		return mux, nil

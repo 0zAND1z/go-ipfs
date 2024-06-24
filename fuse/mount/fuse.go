@@ -1,5 +1,5 @@
-// +build !nofuse
-// +build !windows
+//go:build !nofuse && !windows && !openbsd && !netbsd && !plan9
+// +build !nofuse,!windows,!openbsd,!netbsd,!plan9
 
 package mount
 
@@ -9,14 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
-	"gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse"
-	"gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse/fs"
+	"bazil.org/fuse"
+	"bazil.org/fuse/fs"
+	"github.com/jbenet/goprocess"
 )
 
 var ErrNotMounted = errors.New("not mounted")
 
-// mount implements go-ipfs/fuse/mount
+// mount implements go-ipfs/fuse/mount.
 type mount struct {
 	mpoint   string
 	filesys  fs.FS
@@ -30,15 +30,19 @@ type mount struct {
 
 // Mount mounts a fuse fs.FS at a given location, and returns a Mount instance.
 // parent is a ContextGroup to bind the mount's ContextGroup to.
-func NewMount(p goprocess.Process, fsys fs.FS, mountpoint string, allow_other bool) (Mount, error) {
+func NewMount(p goprocess.Process, fsys fs.FS, mountpoint string, allowOther bool) (Mount, error) {
 	var conn *fuse.Conn
 	var err error
 
-	if allow_other {
-		conn, err = fuse.Mount(mountpoint, fuse.AllowOther())
-	} else {
-		conn, err = fuse.Mount(mountpoint)
+	mountOpts := []fuse.MountOption{
+		fuse.MaxReadahead(64 * 1024 * 1024),
+		fuse.AsyncRead(),
 	}
+
+	if allowOther {
+		mountOpts = append(mountOpts, fuse.AllowOther())
+	}
+	conn, err = fuse.Mount(mountpoint, mountOpts...)
 
 	if err != nil {
 		return nil, err
@@ -56,7 +60,7 @@ func NewMount(p goprocess.Process, fsys fs.FS, mountpoint string, allow_other bo
 
 	// launch the mounting process.
 	if err := m.mount(); err != nil {
-		m.Unmount() // just in case.
+		_ = m.Unmount() // just in case.
 		return nil, err
 	}
 
@@ -111,7 +115,7 @@ func (m *mount) unmount() error {
 		m.setActive(false)
 		return nil
 	}
-	log.Warningf("fuse unmount err: %s", err)
+	log.Warnf("fuse unmount err: %s", err)
 
 	// try closing the fuseConn
 	err = m.fuseConn.Close()
@@ -119,7 +123,7 @@ func (m *mount) unmount() error {
 		m.setActive(false)
 		return nil
 	}
-	log.Warningf("fuse conn error: %s", err)
+	log.Warnf("fuse conn error: %s", err)
 
 	// try mount.ForceUnmountManyTimes
 	if err := ForceUnmountManyTimes(m, 10); err != nil {

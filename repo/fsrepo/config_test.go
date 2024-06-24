@@ -1,17 +1,18 @@
-package fsrepo
+package fsrepo_test
 
 import (
 	"encoding/json"
-	"io/ioutil"
-	"os"
 	"reflect"
 	"testing"
 
-	config "gx/ipfs/QmRwCaRYotCqXsVZAXwWhEJ8A74iAaKnY7MUe6sDgFjrE5/go-ipfs-config"
+	"github.com/ipfs/kubo/plugin/loader"
+	"github.com/ipfs/kubo/repo/fsrepo"
+
+	"github.com/ipfs/kubo/config"
 )
 
 // note: to test sorting of the mountpoints in the disk spec they are
-// specified out of order in the test config
+// specified out of order in the test config.
 var defaultConfig = []byte(`{
     "StorageMax": "10GB",
     "StorageGCWatermark": 90,
@@ -72,11 +73,21 @@ var measureConfig = []byte(`{
 }`)
 
 func TestDefaultDatastoreConfig(t *testing.T) {
-	dir, err := ioutil.TempDir("", "ipfs-datastore-config-test")
+	loader, err := loader.NewPluginLoader("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(dir) // clean up
+	err = loader.Initialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = loader.Inject()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
 
 	config := new(config.Datastore)
 	err = json.Unmarshal(defaultConfig, config)
@@ -84,7 +95,7 @@ func TestDefaultDatastoreConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsc, err := AnyDatastoreConfig(config.Spec)
+	dsc, err := fsrepo.AnyDatastoreConfig(config.Spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,11 +121,7 @@ func TestLevelDbConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := ioutil.TempDir("", "ipfs-datastore-config-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir) // clean up
+	dir := t.TempDir()
 
 	spec := make(map[string]interface{})
 	err = json.Unmarshal(leveldbConfig, &spec)
@@ -122,7 +129,7 @@ func TestLevelDbConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsc, err := AnyDatastoreConfig(spec)
+	dsc, err := fsrepo.AnyDatastoreConfig(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +144,7 @@ func TestLevelDbConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if typ := reflect.TypeOf(ds).String(); typ != "*leveldb.datastore" {
+	if typ := reflect.TypeOf(ds).String(); typ != "*leveldb.Datastore" {
 		t.Errorf("expected '*leveldb.datastore' got '%s'", typ)
 	}
 }
@@ -148,11 +155,7 @@ func TestFlatfsConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := ioutil.TempDir("", "ipfs-datastore-config-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir) // clean up
+	dir := t.TempDir()
 
 	spec := make(map[string]interface{})
 	err = json.Unmarshal(flatfsConfig, &spec)
@@ -160,7 +163,7 @@ func TestFlatfsConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsc, err := AnyDatastoreConfig(spec)
+	dsc, err := fsrepo.AnyDatastoreConfig(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,11 +189,7 @@ func TestMeasureConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := ioutil.TempDir("", "ipfs-datastore-config-test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir) // clean up
+	dir := t.TempDir()
 
 	spec := make(map[string]interface{})
 	err = json.Unmarshal(measureConfig, &spec)
@@ -198,7 +197,7 @@ func TestMeasureConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dsc, err := AnyDatastoreConfig(spec)
+	dsc, err := fsrepo.AnyDatastoreConfig(spec)
 	if err != nil {
 		t.Fatal(err)
 	}

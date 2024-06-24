@@ -16,14 +16,14 @@ test_expect_success "set up test data" '
   done
 '
 
-test_add_large_dir() {
+test_add_dir() {
   exphash="$1"
-  test_expect_success "ipfs add on very large directory succeeds" '
-    ipfs add -r -q testdata | tail -n1 > sharddir_out &&
+  test_expect_success "ipfs add on directory succeeds" '
+    ipfs add -r -Q testdata > sharddir_out &&
     echo "$exphash" > sharddir_exp &&
     test_cmp sharddir_exp sharddir_out
   '
-  test_expect_success "ipfs get on very large directory succeeds" '
+  test_expect_success "ipfs get on directory succeeds" '
     ipfs get -o testdata-out "$exphash" &&
     test_cmp testdata testdata-out
   '
@@ -32,24 +32,29 @@ test_add_large_dir() {
 test_init_ipfs
 
 UNSHARDED="QmavrTrQG4VhoJmantURAYuw3bowq3E2WcvP36NRQDAC1N"
-test_add_large_dir "$UNSHARDED"
+
+test_expect_success "force sharding off" '
+ipfs config --json Internal.UnixFSShardingSizeThreshold "\"1G\""
+'
+
+test_add_dir "$UNSHARDED"
 
 test_launch_ipfs_daemon
 
-test_add_large_dir "$UNSHARDED"
+test_add_dir "$UNSHARDED"
 
 test_kill_ipfs_daemon
 
-test_expect_success "enable sharding" '
-  ipfs config --json Experimental.ShardingEnabled true
+test_expect_success "force sharding on" '
+  ipfs config --json Internal.UnixFSShardingSizeThreshold "\"1B\""
 '
 
 SHARDED="QmSCJD1KYLhVVHqBK3YyXuoEqHt7vggyJhzoFYbT8v1XYL"
-test_add_large_dir "$SHARDED"
+test_add_dir "$SHARDED"
 
 test_launch_ipfs_daemon
 
-test_add_large_dir "$SHARDED"
+test_add_dir "$SHARDED"
 
 test_kill_ipfs_daemon
 
@@ -65,15 +70,16 @@ test_expect_success "ipfs cat error output the same" '
   test_cmp sharded_err unsharded_err
 '
 
-test_expect_success "'ipfs ls --resolve-type=false' admits missing block" '
+test_expect_success "'ipfs ls --resolve-type=false --size=false' admits missing block" '
   ipfs ls "$SHARDED" | head -1 > first_file &&
+  ipfs ls --size=false "$SHARDED" | sort > sharded_out_nosize &&
   read -r HASH _ NAME <first_file &&
   ipfs pin rm "$SHARDED" "$UNSHARDED" && # To allow us to remove the block
   ipfs block rm "$HASH" &&
   test_expect_code 1 ipfs cat "$SHARDED/$NAME" &&
   test_expect_code 1 ipfs ls "$SHARDED" &&
-  ipfs ls --resolve-type=false "$SHARDED" | sort > missing_out &&
-  test_cmp sharded_out missing_out
+  ipfs ls --resolve-type=false --size=false "$SHARDED" | sort > missing_out &&
+  test_cmp sharded_out_nosize missing_out
 '
 
 test_launch_ipfs_daemon
@@ -84,12 +90,18 @@ test_expect_success "gateway can resolve sharded dirs" '
   test_cmp expected actual
 '
 
+test_expect_success "'ipfs resolve' can resolve sharded dirs" '
+  echo /ipfs/QmZ3RfWk1u5LEGYLHA633B5TNJy3Du27K6Fny9wcxpowGS > expected &&
+  ipfs resolve "/ipfs/$SHARDED/file100" > actual &&
+  test_cmp expected actual
+'
+
 test_kill_ipfs_daemon
 
-test_add_large_dir_v1() {
+test_add_dir_v1() {
   exphash="$1"
-  test_expect_success "ipfs add (CIDv1) on very large directory succeeds" '
-    ipfs add -r -q --cid-version=1 testdata | tail -n1 > sharddir_out &&
+  test_expect_success "ipfs add (CIDv1) on directory succeeds" '
+    ipfs add -r -Q --cid-version=1 testdata > sharddir_out &&
     echo "$exphash" > sharddir_exp &&
     test_cmp sharddir_exp sharddir_out
   '
@@ -101,13 +113,33 @@ test_add_large_dir_v1() {
 }
 
 # this hash implies the directory is CIDv1 and leaf entries are CIDv1 and raw
-SHARDEDV1="zdj7WY8aNcxF49q1ZpFXfchNmbswnUxiVDVjmrHb53xRM8W4C"
-test_add_large_dir_v1 "$SHARDEDV1"
+SHARDEDV1="bafybeibiemewfzzdyhq2l74wrd6qj2oz42usjlktgnlqv4yfawgouaqn4u"
+test_add_dir_v1 "$SHARDEDV1"
 
 test_launch_ipfs_daemon
 
-test_add_large_dir_v1 "$SHARDEDV1"
+test_add_dir_v1 "$SHARDEDV1"
 
 test_kill_ipfs_daemon
+
+test_list_incomplete_dir() {
+  test_expect_success "ipfs add (CIDv1) on very large directory with sha3 succeeds" '
+    ipfs add -r -Q --cid-version=1 --hash=sha3-256 --pin=false testdata > sharddir_out &&
+    largeSHA3dir=$(cat sharddir_out)
+  '
+
+  test_expect_success "delete intermediate node from DAG" '
+    ipfs block rm "/ipld/$largeSHA3dir/Links/0/Hash"
+  '
+
+  test_expect_success "can list part of the directory" '
+    ipfs ls "$largeSHA3dir" 2> ls_err_out
+    echo "Error: failed to fetch all nodes" > exp_err_out &&
+    cat ls_err_out &&
+    test_cmp exp_err_out ls_err_out
+  '
+}
+
+test_list_incomplete_dir
 
 test_done

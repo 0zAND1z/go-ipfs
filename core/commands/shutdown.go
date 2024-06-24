@@ -1,30 +1,28 @@
 package commands
 
 import (
-	"fmt"
-
-	"gx/ipfs/QmPVqQHEfLpqK7JLCsUkyam7rhuV3MAeZ9gueQQCrBwCta/go-ipfs-cmdkit"
-	cmds "gx/ipfs/QmUQb3xtNzkQCgTj2NjaqcJZNv2nfSSub2QAdy9DtQMRBT/go-ipfs-cmds"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	cmdenv "github.com/ipfs/kubo/core/commands/cmdenv"
 )
 
 var daemonShutdownCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Shut down the ipfs daemon",
+	Helptext: cmds.HelpText{
+		Tagline: "Shut down the IPFS daemon.",
 	},
-	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) {
-		nd, err := GetNode(env)
+	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
+		nd, err := cmdenv.GetNode(env)
 		if err != nil {
-			re.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		if nd.LocalMode() {
-			re.SetError(fmt.Errorf("daemon not running"), cmdkit.ErrClient)
-			return
+		if !nd.IsDaemon {
+			return cmds.Errorf(cmds.ErrClient, "daemon not running")
 		}
 
-		if err := nd.Process().Close(); err != nil {
+		if err := nd.Close(); err != nil {
 			log.Error("error while shutting down ipfs daemon:", err)
 		}
+
+		return nil
 	},
 }

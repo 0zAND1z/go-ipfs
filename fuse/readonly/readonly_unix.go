@@ -1,4 +1,5 @@
-// +build linux darwin freebsd netbsd openbsd
+//go:build (linux || darwin || freebsd) && !nofuse
+// +build linux darwin freebsd
 // +build !nofuse
 
 package readonly
@@ -10,18 +11,18 @@ import (
 	"os"
 	"syscall"
 
-	core "github.com/ipfs/go-ipfs/core"
-	path "gx/ipfs/QmV1W98rBAovVJGkeYHfqJ19JdT9dQbbWsCq9zPaMyrxYx/go-path"
-	mdag "gx/ipfs/QmYxX4VfVcxmfsj8U6T5kVtFvHsSidy9tmPyPTW5fy7H3q/go-merkledag"
-	uio "gx/ipfs/QmagwbbPqiN1oa3SDMZvpTFE5tNuegF1ULtuJvA9EVzsJv/go-unixfs/io"
-	ftpb "gx/ipfs/QmagwbbPqiN1oa3SDMZvpTFE5tNuegF1ULtuJvA9EVzsJv/go-unixfs/pb"
-
-	logging "gx/ipfs/QmRREK2CAZ5Re2Bd9zZFG6FeYDppUWt5cMgsoUEp3ktgSr/go-log"
-	fuse "gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse"
-	fs "gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse/fs"
-	ipld "gx/ipfs/QmUSyMZ8Vt4vTZr5HdDEgEfpwAXfQRuDdfCFTt7XBzhxpQ/go-ipld-format"
-	lgbl "gx/ipfs/QmcEC2rbyMxUMgpLwt16wquaZdG1aPXcpbKYf4Fedt7hkD/go-libp2p-loggables"
-	proto "gx/ipfs/QmdxUuburamoF6zF9qjeQC4WYcWGbWuRmdLacMEsW8ioD8/gogo-protobuf/proto"
+	fuse "bazil.org/fuse"
+	fs "bazil.org/fuse/fs"
+	mdag "github.com/ipfs/boxo/ipld/merkledag"
+	ft "github.com/ipfs/boxo/ipld/unixfs"
+	uio "github.com/ipfs/boxo/ipld/unixfs/io"
+	"github.com/ipfs/boxo/path"
+	"github.com/ipfs/go-cid"
+	ipld "github.com/ipfs/go-ipld-format"
+	logging "github.com/ipfs/go-log"
+	core "github.com/ipfs/kubo/core"
+	ipldprime "github.com/ipld/go-ipld-prime"
+	cidlink "github.com/ipld/go-ipld-prime/linking/cid"
 )
 
 var log = logging.Logger("fuse/ipfs")
@@ -48,7 +49,7 @@ type Root struct {
 
 // Attr returns file attributes.
 func (*Root) Attr(ctx context.Context, a *fuse.Attr) error {
-	a.Mode = os.ModeDir | 0111 // -rw+x
+	a.Mode = os.ModeDir | 0o111 // -rw+x
 	return nil
 }
 
@@ -58,48 +59,84 @@ func (s *Root) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	switch name {
 	case "mach_kernel", ".hidden", "._.":
 		// Just quiet some log noise on OS X.
-		return nil, fuse.ENOENT
+		return nil, syscall.Errno(syscall.ENOENT)
 	}
 
-	p, err := path.ParsePath(name)
+	p, err := path.NewPath("/ipfs/" + name)
 	if err != nil {
 		log.Debugf("fuse failed to parse path: %q: %s", name, err)
-		return nil, fuse.ENOENT
+		return nil, syscall.Errno(syscall.ENOENT)
 	}
 
-	nd, err := s.Ipfs.Resolver.ResolvePath(ctx, p)
+	imPath, err := path.NewImmutablePath(p)
+	if err != nil {
+		log.Debugf("fuse failed to convert path: %q: %s", name, err)
+		return nil, syscall.Errno(syscall.ENOENT)
+	}
+
+	nd, ndLnk, err := s.Ipfs.UnixFSPathResolver.ResolvePath(ctx, imPath)
 	if err != nil {
 		// todo: make this error more versatile.
-		return nil, fuse.ENOENT
+		return nil, syscall.Errno(syscall.ENOENT)
 	}
 
-	switch nd := nd.(type) {
-	case *mdag.ProtoNode, *mdag.RawNode:
-		return &Node{Ipfs: s.Ipfs, Nd: nd}, nil
+	cidLnk, ok := ndLnk.(cidlink.Link)
+	if !ok {
+		log.Debugf("non-cidlink returned from ResolvePath: %v", ndLnk)
+		return nil, syscall.Errno(syscall.ENOENT)
+	}
+
+	// convert ipld-prime node to universal node
+	blk, err := s.Ipfs.Blockstore.Get(ctx, cidLnk.Cid)
+	if err != nil {
+		log.Debugf("fuse failed to retrieve block: %v: %s", cidLnk, err)
+		return nil, syscall.Errno(syscall.ENOENT)
+	}
+
+	var fnd ipld.Node
+	switch cidLnk.Cid.Prefix().Codec {
+	case cid.DagProtobuf:
+		adl, ok := nd.(ipldprime.ADL)
+		if ok {
+			substrate := adl.Substrate()
+			fnd, err = mdag.ProtoNodeConverter(blk, substrate)
+		} else {
+			fnd, err = mdag.ProtoNodeConverter(blk, nd)
+		}
+	case cid.Raw:
+		fnd, err = mdag.RawNodeConverter(blk, nd)
 	default:
-		log.Error("fuse node was not a protobuf node")
-		return nil, fuse.ENOTSUP
+		log.Error("fuse node was not a supported type")
+		return nil, syscall.Errno(syscall.ENOTSUP)
+	}
+	if err != nil {
+		log.Errorf("could not convert protobuf or raw node: %s", err)
+		return nil, syscall.Errno(syscall.ENOENT)
 	}
 
+	return &Node{Ipfs: s.Ipfs, Nd: fnd}, nil
 }
 
 // ReadDirAll reads a particular directory. Disallowed for root.
 func (*Root) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	log.Debug("read Root")
-	return nil, fuse.EPERM
+	return nil, syscall.Errno(syscall.EPERM)
 }
 
 // Node is the core object representing a filesystem tree node.
 type Node struct {
 	Ipfs   *core.IpfsNode
 	Nd     ipld.Node
-	cached *ftpb.Data
+	cached *ft.FSNode
 }
 
 func (s *Node) loadData() error {
 	if pbnd, ok := s.Nd.(*mdag.ProtoNode); ok {
-		s.cached = new(ftpb.Data)
-		return proto.Unmarshal(pbnd.Data(), s.cached)
+		fsn, err := ft.FSNodeFromBytes(pbnd.Data())
+		if err != nil {
+			return err
+		}
+		s.cached = fsn
 	}
 	return nil
 }
@@ -108,7 +145,7 @@ func (s *Node) loadData() error {
 func (s *Node) Attr(ctx context.Context, a *fuse.Attr) error {
 	log.Debug("Node attr")
 	if rawnd, ok := s.Nd.(*mdag.RawNode); ok {
-		a.Mode = 0444
+		a.Mode = 0o444
 		a.Size = uint64(len(rawnd.RawData()))
 		a.Blocks = 1
 		return nil
@@ -119,23 +156,23 @@ func (s *Node) Attr(ctx context.Context, a *fuse.Attr) error {
 			return fmt.Errorf("readonly: loadData() failed: %s", err)
 		}
 	}
-	switch s.cached.GetType() {
-	case ftpb.Data_Directory, ftpb.Data_HAMTShard:
-		a.Mode = os.ModeDir | 0555
-	case ftpb.Data_File:
-		size := s.cached.GetFilesize()
-		a.Mode = 0444
+	switch s.cached.Type() {
+	case ft.TDirectory, ft.THAMTShard:
+		a.Mode = os.ModeDir | 0o555
+	case ft.TFile:
+		size := s.cached.FileSize()
+		a.Mode = 0o444
 		a.Size = uint64(size)
 		a.Blocks = uint64(len(s.Nd.Links()))
-	case ftpb.Data_Raw:
-		a.Mode = 0444
-		a.Size = uint64(len(s.cached.GetData()))
+	case ft.TRaw:
+		a.Mode = 0o444
+		a.Size = uint64(len(s.cached.Data()))
 		a.Blocks = uint64(len(s.Nd.Links()))
-	case ftpb.Data_Symlink:
-		a.Mode = 0777 | os.ModeSymlink
-		a.Size = uint64(len(s.cached.GetData()))
+	case ft.TSymlink:
+		a.Mode = 0o777 | os.ModeSymlink
+		a.Size = uint64(len(s.cached.Data()))
 	default:
-		return fmt.Errorf("invalid data type - %s", s.cached.GetType())
+		return fmt.Errorf("invalid data type - %s", s.cached.Type())
 	}
 	return nil
 }
@@ -147,28 +184,24 @@ func (s *Node) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	switch err {
 	case os.ErrNotExist, mdag.ErrLinkNotFound:
 		// todo: make this error more versatile.
-		return nil, fuse.ENOENT
-	default:
-		log.Errorf("fuse lookup %q: %s", name, err)
-		return nil, fuse.EIO
+		return nil, syscall.Errno(syscall.ENOENT)
 	case nil:
 		// noop
+	default:
+		log.Errorf("fuse lookup %q: %s", name, err)
+		return nil, syscall.Errno(syscall.EIO)
 	}
 
 	nd, err := s.Ipfs.DAG.Get(ctx, link.Cid)
-	switch err {
-	case ipld.ErrNotFound:
-	default:
+	if err != nil && !ipld.IsNotFound(err) {
 		log.Errorf("fuse lookup %q: %s", name, err)
 		return nil, err
-	case nil:
-		// noop
 	}
 
 	return &Node{Ipfs: s.Ipfs, Nd: nd}, nil
 }
 
-// ReadDirAll reads the link structure as directory entries
+// ReadDirAll reads the link structure as directory entries.
 func (s *Node) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	log.Debug("Node ReadDir")
 	dir, err := uio.NewDirectoryFromNode(s.Ipfs.DAG, s.Nd)
@@ -184,7 +217,7 @@ func (s *Node) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		}
 		nd, err := s.Ipfs.DAG.Get(ctx, lnk.Cid)
 		if err != nil {
-			log.Warning("error fetching directory child node: ", err)
+			log.Warn("error fetching directory child node: ", err)
 		}
 
 		t := fuse.DT_Unknown
@@ -192,21 +225,20 @@ func (s *Node) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		case *mdag.RawNode:
 			t = fuse.DT_File
 		case *mdag.ProtoNode:
-			var data ftpb.Data
-			if err := proto.Unmarshal(nd.Data(), &data); err != nil {
-				log.Warning("failed to unmarshal protonode data field:", err)
+			if fsn, err := ft.FSNodeFromBytes(nd.Data()); err != nil {
+				log.Warn("failed to unmarshal protonode data field:", err)
 			} else {
-				switch data.GetType() {
-				case ftpb.Data_Directory, ftpb.Data_HAMTShard:
+				switch fsn.Type() {
+				case ft.TDirectory, ft.THAMTShard:
 					t = fuse.DT_Dir
-				case ftpb.Data_File, ftpb.Data_Raw:
+				case ft.TFile, ft.TRaw:
 					t = fuse.DT_File
-				case ftpb.Data_Symlink:
+				case ft.TSymlink:
 					t = fuse.DT_Link
-				case ftpb.Data_Metadata:
+				case ft.TMetadata:
 					log.Error("metadata object in fuse should contain its wrapped type")
 				default:
-					log.Error("unrecognized protonode data type: ", data.GetType())
+					log.Error("unrecognized protonode data type: ", fsn.Type())
 				}
 			}
 		}
@@ -220,54 +252,45 @@ func (s *Node) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	if len(entries) > 0 {
 		return entries, nil
 	}
-	return nil, fuse.ENOENT
+	return nil, syscall.Errno(syscall.ENOENT)
 }
 
 func (s *Node) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
-	// TODO: is nil the right response for 'bug off, we aint got none' ?
+	// TODO: is nil the right response for 'bug off, we ain't got none' ?
 	resp.Xattr = nil
 	return nil
 }
 
 func (s *Node) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
-	if s.cached == nil || s.cached.GetType() != ftpb.Data_Symlink {
+	if s.cached == nil || s.cached.Type() != ft.TSymlink {
 		return "", fuse.Errno(syscall.EINVAL)
 	}
-	return string(s.cached.GetData()), nil
+	return string(s.cached.Data()), nil
 }
 
 func (s *Node) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
-	c := s.Nd.Cid()
-
-	// setup our logging event
-	lm := make(lgbl.DeferredMap)
-	lm["fs"] = "ipfs"
-	lm["key"] = func() interface{} { return c.String() }
-	lm["req_offset"] = req.Offset
-	lm["req_size"] = req.Size
-	defer log.EventBegin(ctx, "fuseRead", lm).Done()
-
 	r, err := uio.NewDagReader(ctx, s.Nd, s.Ipfs.DAG)
 	if err != nil {
 		return err
 	}
-	o, err := r.Seek(req.Offset, io.SeekStart)
-	lm["res_offset"] = o
+	_, err = r.Seek(req.Offset, io.SeekStart)
 	if err != nil {
 		return err
 	}
-
-	buf := resp.Data[:min(req.Size, int(int64(r.Size())-req.Offset))]
+	// Data has a capacity of Size
+	buf := resp.Data[:int(req.Size)]
 	n, err := io.ReadFull(r, buf)
-	if err != nil && err != io.EOF {
+	resp.Data = buf[:n]
+	switch err {
+	case nil, io.EOF, io.ErrUnexpectedEOF:
+	default:
 		return err
 	}
 	resp.Data = resp.Data[:n]
-	lm["res_size"] = n
 	return nil // may be non-nil / not succeeded
 }
 
-// to check that out Node implements all the interfaces we want
+// to check that our Node implements all the interfaces we want.
 type roRoot interface {
 	fs.Node
 	fs.HandleReadDirAller
@@ -286,10 +309,3 @@ type roNode interface {
 }
 
 var _ roNode = (*Node)(nil)
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

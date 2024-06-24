@@ -1,4 +1,5 @@
-// +build !nofuse
+//go:build !nofuse && !openbsd && !netbsd && !plan9
+// +build !nofuse,!openbsd,!netbsd,!plan9
 
 package ipns
 
@@ -6,8 +7,8 @@ import (
 	"context"
 	"os"
 
-	"gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse"
-	"gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse/fs"
+	"bazil.org/fuse"
+	"bazil.org/fuse/fs"
 )
 
 type Link struct {
@@ -16,7 +17,7 @@ type Link struct {
 
 func (l *Link) Attr(ctx context.Context, a *fuse.Attr) error {
 	log.Debug("Link attr.")
-	a.Mode = os.ModeSymlink | 0555
+	a.Mode = os.ModeSymlink | 0o555
 	return nil
 }
 

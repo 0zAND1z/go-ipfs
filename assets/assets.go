@@ -1,92 +1,61 @@
-//go:generate go-bindata -pkg=assets -prefix=$GOPATH/src/gx/ipfs/QmdZ4PvPHFQVLLEve7DgoKDcSY19wwpGBB1GKjjKi2rEL1 init-doc $GOPATH/src/gx/ipfs/QmdZ4PvPHFQVLLEve7DgoKDcSY19wwpGBB1GKjjKi2rEL1/dir-index-html
-//go:generate gofmt -w bindata.go
-
 package assets
 
 import (
-	"bytes"
+	"embed"
 	"fmt"
-	"os"
-	"path/filepath"
+	gopath "path"
 
-	"github.com/ipfs/go-ipfs/core"
-	"github.com/ipfs/go-ipfs/core/coreunix"
-	uio "gx/ipfs/QmagwbbPqiN1oa3SDMZvpTFE5tNuegF1ULtuJvA9EVzsJv/go-unixfs/io"
-	cid "gx/ipfs/Qmdu2AYUV7yMoVBQPxXNfe7FJcdx16kYtsx6jAPKWQYF1y/go-cid"
+	"github.com/ipfs/kubo/core"
+	"github.com/ipfs/kubo/core/coreapi"
 
-	// this import keeps gx from thinking the dep isn't used
-	_ "gx/ipfs/QmdZ4PvPHFQVLLEve7DgoKDcSY19wwpGBB1GKjjKi2rEL1/dir-index-html"
+	"github.com/ipfs/boxo/files"
+	cid "github.com/ipfs/go-cid"
 )
 
-// initDocPaths lists the paths for the docs we want to seed during --init
+//go:embed init-doc
+var Asset embed.FS
+
+// initDocPaths lists the paths for the docs we want to seed during --init.
 var initDocPaths = []string{
-	filepath.Join("init-doc", "about"),
-	filepath.Join("init-doc", "readme"),
-	filepath.Join("init-doc", "help"),
-	filepath.Join("init-doc", "contact"),
-	filepath.Join("init-doc", "security-notes"),
-	filepath.Join("init-doc", "quick-start"),
-	filepath.Join("init-doc", "ping"),
+	gopath.Join("init-doc", "about"),
+	gopath.Join("init-doc", "readme"),
+	gopath.Join("init-doc", "help"),
+	gopath.Join("init-doc", "contact"),
+	gopath.Join("init-doc", "security-notes"),
+	gopath.Join("init-doc", "quick-start"),
+	gopath.Join("init-doc", "ping"),
 }
 
-// SeedInitDocs adds the list of embedded init documentation to the passed node, pins it and returns the root key
-func SeedInitDocs(nd *core.IpfsNode) (*cid.Cid, error) {
+// SeedInitDocs adds the list of embedded init documentation to the passed node, pins it and returns the root key.
+func SeedInitDocs(nd *core.IpfsNode) (cid.Cid, error) {
 	return addAssetList(nd, initDocPaths)
 }
 
-var initDirPath = filepath.Join(os.Getenv("GOPATH"), "gx", "ipfs", "QmdZ4PvPHFQVLLEve7DgoKDcSY19wwpGBB1GKjjKi2rEL1", "dir-index-html")
-var initDirIndex = []string{
-	filepath.Join(initDirPath, "knownIcons.txt"),
-	filepath.Join(initDirPath, "dir-index.html"),
-}
+func addAssetList(nd *core.IpfsNode, l []string) (cid.Cid, error) {
+	api, err := coreapi.NewCoreAPI(nd)
+	if err != nil {
+		return cid.Cid{}, err
+	}
 
-func SeedInitDirIndex(nd *core.IpfsNode) (*cid.Cid, error) {
-	return addAssetList(nd, initDirIndex)
-}
-
-func addAssetList(nd *core.IpfsNode, l []string) (*cid.Cid, error) {
-	dirb := uio.NewDirectory(nd.DAG)
+	dirMap := map[string]files.Node{}
 
 	for _, p := range l {
-		d, err := Asset(p)
+		d, err := Asset.ReadFile(p)
 		if err != nil {
-			return nil, fmt.Errorf("assets: could load Asset '%s': %s", p, err)
+			return cid.Cid{}, fmt.Errorf("assets: could load Asset '%s': %s", p, err)
 		}
 
-		s, err := coreunix.Add(nd, bytes.NewBuffer(d))
-		if err != nil {
-			return nil, fmt.Errorf("assets: could not Add '%s': %s", p, err)
-		}
-
-		fname := filepath.Base(p)
-
-		c, err := cid.Decode(s)
-		if err != nil {
-			return nil, err
-		}
-
-		node, err := nd.DAG.Get(nd.Context(), c)
-		if err != nil {
-			return nil, err
-		}
-
-		if err := dirb.AddChild(nd.Context(), fname, node); err != nil {
-			return nil, fmt.Errorf("assets: could not add '%s' as a child: %s", fname, err)
-		}
+		dirMap[gopath.Base(p)] = files.NewBytesFile(d)
 	}
 
-	dir, err := dirb.GetNode()
+	basePath, err := api.Unixfs().Add(nd.Context(), files.NewMapDirectory(dirMap))
 	if err != nil {
-		return nil, err
+		return cid.Cid{}, err
 	}
 
-	if err := nd.Pinning.Pin(nd.Context(), dir, true); err != nil {
-		return nil, fmt.Errorf("assets: Pinning on init-docu failed: %s", err)
+	if err := api.Pin().Add(nd.Context(), basePath); err != nil {
+		return cid.Cid{}, err
 	}
 
-	if err := nd.Pinning.Flush(); err != nil {
-		return nil, fmt.Errorf("assets: Pinning flush failed: %s", err)
-	}
-
-	return dir.Cid(), nil
+	return basePath.RootCid(), nil
 }

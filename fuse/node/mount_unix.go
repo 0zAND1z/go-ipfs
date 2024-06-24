@@ -1,4 +1,5 @@
-// +build !windows,!nofuse
+//go:build !windows && !openbsd && !netbsd && !plan9 && !nofuse
+// +build !windows,!openbsd,!netbsd,!plan9,!nofuse
 
 package node
 
@@ -8,24 +9,24 @@ import (
 	"strings"
 	"sync"
 
-	core "github.com/ipfs/go-ipfs/core"
-	ipns "github.com/ipfs/go-ipfs/fuse/ipns"
-	mount "github.com/ipfs/go-ipfs/fuse/mount"
-	rofs "github.com/ipfs/go-ipfs/fuse/readonly"
+	core "github.com/ipfs/kubo/core"
+	ipns "github.com/ipfs/kubo/fuse/ipns"
+	mount "github.com/ipfs/kubo/fuse/mount"
+	rofs "github.com/ipfs/kubo/fuse/readonly"
 
-	logging "gx/ipfs/QmRREK2CAZ5Re2Bd9zZFG6FeYDppUWt5cMgsoUEp3ktgSr/go-log"
+	logging "github.com/ipfs/go-log"
 )
 
 var log = logging.Logger("node")
 
-// fuseNoDirectory used to check the returning fuse error
+// fuseNoDirectory used to check the returning fuse error.
 const fuseNoDirectory = "fusermount: failed to access mountpoint"
 
-// fuseExitStatus1 used to check the returning fuse error
+// fuseExitStatus1 used to check the returning fuse error.
 const fuseExitStatus1 = "fusermount: exit status 1"
 
 // platformFuseChecks can get overridden by arch-specific files
-// to run fuse checks (like checking the OSXFUSE version)
+// to run fuse checks (like checking the OSXFUSE version).
 var platformFuseChecks = func(*core.IpfsNode) error {
 	return nil
 }
@@ -35,10 +36,12 @@ func Mount(node *core.IpfsNode, fsdir, nsdir string) error {
 	// if the user said "Mount", then there must be something wrong.
 	// so, close them and try again.
 	if node.Mounts.Ipfs != nil && node.Mounts.Ipfs.IsActive() {
-		node.Mounts.Ipfs.Unmount()
+		// best effort
+		_ = node.Mounts.Ipfs.Unmount()
 	}
 	if node.Mounts.Ipns != nil && node.Mounts.Ipns.IsActive() {
-		node.Mounts.Ipns.Unmount()
+		// best effort
+		_ = node.Mounts.Ipns.Unmount()
 	}
 
 	if err := platformFuseChecks(node); err != nil {
@@ -75,7 +78,7 @@ func doMount(node *core.IpfsNode, fsdir, nsdir string) error {
 		fsmount, err1 = rofs.Mount(node, fsdir)
 	}()
 
-	if node.OnlineMode() {
+	if node.IsOnline {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -95,10 +98,10 @@ func doMount(node *core.IpfsNode, fsdir, nsdir string) error {
 
 	if err1 != nil || err2 != nil {
 		if fsmount != nil {
-			fsmount.Unmount()
+			_ = fsmount.Unmount()
 		}
 		if nsmount != nil {
-			nsmount.Unmount()
+			_ = nsmount.Unmount()
 		}
 
 		if err1 != nil {

@@ -3,17 +3,16 @@ package main
 import (
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path"
 	"testing"
 
-	"github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/jbenet/go-random"
-	"github.com/ipfs/go-ipfs/thirdparty/unit"
+	"github.com/ipfs/kubo/thirdparty/unit"
 
-	config "gx/ipfs/QmRwCaRYotCqXsVZAXwWhEJ8A74iAaKnY7MUe6sDgFjrE5/go-ipfs-config"
+	config "github.com/ipfs/kubo/config"
+	random "github.com/jbenet/go-random"
 )
 
 var (
@@ -46,12 +45,7 @@ func benchmarkAdd(amount int64) (*testing.BenchmarkResult, error) {
 		b.SetBytes(amount)
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			tmpDir, err := ioutil.TempDir("", "")
-			if err != nil {
-				benchmarkError = err
-				b.Fatal(err)
-			}
-			defer os.RemoveAll(tmpDir)
+			tmpDir := b.TempDir()
 
 			env := append(
 				[]string{fmt.Sprintf("%s=%s", config.EnvDir, path.Join(tmpDir, config.DefaultPathName))}, // first in order to override
@@ -65,7 +59,7 @@ func benchmarkAdd(amount int64) (*testing.BenchmarkResult, error) {
 				}
 			}
 
-			initCmd := exec.Command("ipfs", "init", "-b=1024")
+			initCmd := exec.Command("ipfs", "init", "-b=2048")
 			setupCmd(initCmd)
 			if err := initCmd.Run(); err != nil {
 				benchmarkError = err
@@ -73,14 +67,17 @@ func benchmarkAdd(amount int64) (*testing.BenchmarkResult, error) {
 			}
 
 			const seed = 1
-			f, err := ioutil.TempFile("", "")
+			f, err := os.CreateTemp("", "")
 			if err != nil {
 				benchmarkError = err
 				b.Fatal(err)
 			}
 			defer os.Remove(f.Name())
 
-			random.WritePseudoRandomBytes(amount, f, seed)
+			if err := random.WritePseudoRandomBytes(amount, f, seed); err != nil {
+				benchmarkError = err
+				b.Fatal(err)
+			}
 			if err := f.Close(); err != nil {
 				benchmarkError = err
 				b.Fatal(err)
@@ -95,8 +92,10 @@ func benchmarkAdd(amount int64) (*testing.BenchmarkResult, error) {
 						benchmarkError = err
 						b.Fatal(err)
 					}
-					defer daemonCmd.Wait()
-					defer daemonCmd.Process.Signal(os.Interrupt)
+					defer func() {
+						_ = daemonCmd.Process.Signal(os.Interrupt)
+						_ = daemonCmd.Wait()
+					}()
 				}
 
 				b.StartTimer()

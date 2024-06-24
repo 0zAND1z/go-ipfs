@@ -2,20 +2,18 @@ package git
 
 import (
 	"compress/zlib"
-	"fmt"
 	"io"
-	"math"
 
-	"github.com/ipfs/go-ipfs/core/coredag"
-	"github.com/ipfs/go-ipfs/plugin"
+	"github.com/ipfs/kubo/plugin"
 
-	git "gx/ipfs/QmP9DkuJDoiY4QS9wHv3RS4Yc8LDRK5yyUUj3LK7UbmyJb/go-ipld-git"
-	mh "gx/ipfs/QmPnFwZ2JXKnXgMw8CdBPxn7FWh6LLdjUjxV1fKHuJnkr8/go-multihash"
-	"gx/ipfs/QmUSyMZ8Vt4vTZr5HdDEgEfpwAXfQRuDdfCFTt7XBzhxpQ/go-ipld-format"
-	"gx/ipfs/Qmdu2AYUV7yMoVBQPxXNfe7FJcdx16kYtsx6jAPKWQYF1y/go-cid"
+	// Note that depending on this package registers it's multicodec encoder and decoder.
+	git "github.com/ipfs/go-ipld-git"
+	"github.com/ipld/go-ipld-prime"
+	"github.com/ipld/go-ipld-prime/multicodec"
+	mc "github.com/multiformats/go-multicodec"
 )
 
-// Plugins is exported list of plugins that will be loaded
+// Plugins is exported list of plugins that will be loaded.
 var Plugins = []plugin.Plugin{
 	&gitPlugin{},
 }
@@ -32,44 +30,25 @@ func (*gitPlugin) Version() string {
 	return "0.0.1"
 }
 
-func (*gitPlugin) Init() error {
+func (*gitPlugin) Init(_ *plugin.Environment) error {
 	return nil
 }
 
-func (*gitPlugin) RegisterBlockDecoders(dec format.BlockDecoder) error {
-	dec.Register(cid.GitRaw, git.DecodeBlock)
+func (*gitPlugin) Register(reg multicodec.Registry) error {
+	// register a custom identifier in the reserved range for import of "zlib-encoded git objects."
+	reg.RegisterDecoder(uint64(mc.ReservedStart+mc.GitRaw), decodeZlibGit)
+	reg.RegisterEncoder(uint64(mc.GitRaw), git.Encode)
+	reg.RegisterDecoder(uint64(mc.GitRaw), git.Decode)
 	return nil
 }
 
-func (*gitPlugin) RegisterInputEncParsers(iec coredag.InputEncParsers) error {
-	iec.AddParser("raw", "git", parseRawGit)
-	iec.AddParser("zlib", "git", parseZlibGit)
-	return nil
-}
-
-func parseRawGit(r io.Reader, mhType uint64, mhLen int) ([]format.Node, error) {
-	if mhType != math.MaxUint64 && mhType != mh.SHA1 {
-		return nil, fmt.Errorf("unsupported mhType %d", mhType)
-	}
-
-	if mhLen != -1 && mhLen != mh.DefaultLengths[mh.SHA1] {
-		return nil, fmt.Errorf("invalid mhLen %d", mhLen)
-	}
-
-	nd, err := git.ParseObject(r)
-	if err != nil {
-		return nil, err
-	}
-
-	return []format.Node{nd}, nil
-}
-
-func parseZlibGit(r io.Reader, mhType uint64, mhLen int) ([]format.Node, error) {
+func decodeZlibGit(na ipld.NodeAssembler, r io.Reader) error {
 	rc, err := zlib.NewReader(r)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	defer rc.Close()
-	return parseRawGit(rc, mhType, mhLen)
+
+	return git.Decode(na, rc)
 }

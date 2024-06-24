@@ -12,15 +12,15 @@ type OnlyOne struct {
 }
 
 // Open a Repo identified by key. If Repo is not already open, the
-// open function is called, and the result is remember for further
+// open function is called, and the result is remembered for further
 // use.
 //
 // Key must be comparable, or Open will panic. Make sure to pick keys
 // that are unique across different concrete Repo implementations,
 // e.g. by creating a local type:
 //
-//     type repoKey string
-//     r, err := o.Open(repoKey(path), open)
+//	type repoKey string
+//	r, err := o.Open(repoKey(path), open)
 //
 // Call Repo.Close when done.
 func (o *OnlyOne) Open(key interface{}, open func() (Repo, error)) (Repo, error) {

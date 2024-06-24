@@ -2,138 +2,171 @@ package coreapi
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	core "github.com/ipfs/go-ipfs/core"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	caopts "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
-	keystore "github.com/ipfs/go-ipfs/keystore"
-	namesys "github.com/ipfs/go-ipfs/namesys"
-	nsopts "github.com/ipfs/go-ipfs/namesys/opts"
-	ipath "gx/ipfs/QmV1W98rBAovVJGkeYHfqJ19JdT9dQbbWsCq9zPaMyrxYx/go-path"
+	"github.com/ipfs/boxo/ipns"
+	keystore "github.com/ipfs/boxo/keystore"
+	"github.com/ipfs/boxo/namesys"
+	"github.com/ipfs/kubo/tracing"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
-	crypto "gx/ipfs/QmPvyPwuCgJ7pDmrKDxRtsScJgBaM5h4EpRL2qQJsmXf4n/go-libp2p-crypto"
-	offline "gx/ipfs/QmYey7kzAAqmXXbr38qH4oGGkB5m5swJeJCQfHgt8nrDES/go-ipfs-routing/offline"
-	peer "gx/ipfs/QmcZSzKEM5yDfpZbeEEZaVmaZ1zXm6JWTbrQZSB8hCVPzk/go-libp2p-peer"
+	"github.com/ipfs/boxo/path"
+	coreiface "github.com/ipfs/kubo/core/coreiface"
+	caopts "github.com/ipfs/kubo/core/coreiface/options"
+	ci "github.com/libp2p/go-libp2p/core/crypto"
+	peer "github.com/libp2p/go-libp2p/core/peer"
 )
 
 type NameAPI CoreAPI
 
-type ipnsEntry struct {
-	name  string
-	value coreiface.Path
-}
-
-// Name returns the ipnsEntry name.
-func (e *ipnsEntry) Name() string {
-	return e.name
-}
-
-// Value returns the ipnsEntry value.
-func (e *ipnsEntry) Value() coreiface.Path {
-	return e.value
-}
-
 // Publish announces new IPNS name and returns the new IPNS entry.
-func (api *NameAPI) Publish(ctx context.Context, p coreiface.Path, opts ...caopts.NamePublishOption) (coreiface.IpnsEntry, error) {
+func (api *NameAPI) Publish(ctx context.Context, p path.Path, opts ...caopts.NamePublishOption) (ipns.Name, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI.NameAPI", "Publish", trace.WithAttributes(attribute.String("path", p.String())))
+	defer span.End()
+
+	if err := api.checkPublishAllowed(); err != nil {
+		return ipns.Name{}, err
+	}
+
 	options, err := caopts.NamePublishOptions(opts...)
 	if err != nil {
-		return nil, err
+		return ipns.Name{}, err
 	}
-	n := api.node
-
-	if !n.OnlineMode() {
-		err := n.SetupOfflineRouting()
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if n.Mounts.Ipns != nil && n.Mounts.Ipns.IsActive() {
-		return nil, errors.New("cannot manually publish while IPNS is mounted")
+	span.SetAttributes(
+		attribute.Bool("allowoffline", options.AllowOffline),
+		attribute.String("key", options.Key),
+		attribute.Float64("validtime", options.ValidTime.Seconds()),
+	)
+	if options.TTL != nil {
+		span.SetAttributes(attribute.Float64("ttl", options.TTL.Seconds()))
 	}
 
-	pth, err := ipath.ParsePath(p.String())
+	err = api.checkOnline(options.AllowOffline)
 	if err != nil {
-		return nil, err
+		return ipns.Name{}, err
 	}
 
-	k, err := keylookup(n, options.Key)
+	k, err := keylookup(api.privateKey, api.repo.Keystore(), options.Key)
 	if err != nil {
-		return nil, err
+		return ipns.Name{}, err
 	}
 
 	eol := time.Now().Add(options.ValidTime)
-	err = n.Namesys.PublishWithEOL(ctx, k, pth, eol)
+
+	publishOptions := []namesys.PublishOption{
+		namesys.PublishWithEOL(eol),
+		namesys.PublishWithIPNSOption(ipns.WithV1Compatibility(options.CompatibleWithV1)),
+	}
+
+	if options.TTL != nil {
+		publishOptions = append(publishOptions, namesys.PublishWithTTL(*options.TTL))
+	}
+
+	err = api.namesys.Publish(ctx, k, p, publishOptions...)
 	if err != nil {
-		return nil, err
+		return ipns.Name{}, err
 	}
 
 	pid, err := peer.IDFromPrivateKey(k)
 	if err != nil {
-		return nil, err
+		return ipns.Name{}, err
 	}
 
-	return &ipnsEntry{
-		name:  pid.Pretty(),
-		value: p,
-	}, nil
+	return ipns.NameFromPeer(pid), nil
 }
 
-// Resolve attempts to resolve the newest version of the specified name and
-// returns its path.
-func (api *NameAPI) Resolve(ctx context.Context, name string, opts ...caopts.NameResolveOption) (coreiface.Path, error) {
+func (api *NameAPI) Search(ctx context.Context, name string, opts ...caopts.NameResolveOption) (<-chan coreiface.IpnsResult, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI.NameAPI", "Search", trace.WithAttributes(attribute.String("name", name)))
+	defer span.End()
+
 	options, err := caopts.NameResolveOptions(opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	n := api.node
+	span.SetAttributes(attribute.Bool("cache", options.Cache))
 
-	if !n.OnlineMode() {
-		err := n.SetupOfflineRouting()
+	err = api.checkOnline(true)
+	if err != nil {
+		return nil, err
+	}
+
+	var resolver namesys.Resolver = api.namesys
+	if !options.Cache {
+		resolver, err = namesys.NewNameSystem(api.routing,
+			namesys.WithDatastore(api.repo.Datastore()),
+			namesys.WithDNSResolver(api.dnsResolver))
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	var resolver namesys.Resolver = n.Namesys
-
-	if options.Local && !options.Cache {
-		return nil, errors.New("cannot specify both local and nocache")
-	}
-
-	if options.Local {
-		offroute := offline.NewOfflineRouter(n.Repo.Datastore(), n.RecordValidator)
-		resolver = namesys.NewIpnsResolver(offroute)
-	}
-
-	if !options.Cache {
-		resolver = namesys.NewNameSystem(n.Routing, n.Repo.Datastore(), 0)
 	}
 
 	if !strings.HasPrefix(name, "/ipns/") {
 		name = "/ipns/" + name
 	}
 
-	var ropts []nsopts.ResolveOpt
-	if !options.Recursive {
-		ropts = append(ropts, nsopts.Depth(1))
-	}
-
-	output, err := resolver.Resolve(ctx, name, ropts...)
+	p, err := path.NewPath(name)
 	if err != nil {
 		return nil, err
 	}
 
-	return coreiface.ParsePath(output.String())
+	out := make(chan coreiface.IpnsResult)
+	go func() {
+		defer close(out)
+		for res := range resolver.ResolveAsync(ctx, p, options.ResolveOpts...) {
+			select {
+			case out <- coreiface.IpnsResult{Path: res.Path, Err: res.Err}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	return out, nil
 }
 
-func keylookup(n *core.IpfsNode, k string) (crypto.PrivKey, error) {
-	res, err := n.GetKey(k)
+// Resolve attempts to resolve the newest version of the specified name and
+// returns its path.
+func (api *NameAPI) Resolve(ctx context.Context, name string, opts ...caopts.NameResolveOption) (path.Path, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI.NameAPI", "Resolve", trace.WithAttributes(attribute.String("name", name)))
+	defer span.End()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results, err := api.Search(ctx, name, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	err = coreiface.ErrResolveFailed
+	var p path.Path
+
+	for res := range results {
+		p, err = res.Path, res.Err
+		if err != nil {
+			break
+		}
+	}
+
+	return p, err
+}
+
+func keylookup(self ci.PrivKey, kstore keystore.Keystore, k string) (ci.PrivKey, error) {
+	////////////////////
+	// Lookup by name //
+	////////////////////
+
+	// First, lookup self.
+	if k == "self" {
+		return self, nil
+	}
+
+	// Then, look in the keystore.
+	res, err := kstore.Get(k)
 	if res != nil {
 		return res, nil
 	}
@@ -142,25 +175,41 @@ func keylookup(n *core.IpfsNode, k string) (crypto.PrivKey, error) {
 		return nil, err
 	}
 
-	keys, err := n.Repo.Keystore().List()
+	keys, err := kstore.List()
 	if err != nil {
 		return nil, err
 	}
 
+	//////////////////
+	// Lookup by ID //
+	//////////////////
+	targetPid, err := peer.Decode(k)
+	if err != nil {
+		return nil, keystore.ErrNoSuchKey
+	}
+
+	// First, check self.
+	pid, err := peer.IDFromPrivateKey(self)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine peer ID for private key: %w", err)
+	}
+	if pid == targetPid {
+		return self, nil
+	}
+
+	// Then, look in the keystore.
 	for _, key := range keys {
-		privKey, err := n.Repo.Keystore().Get(key)
+		privKey, err := kstore.Get(key)
 		if err != nil {
 			return nil, err
 		}
 
-		pubKey := privKey.GetPublic()
-
-		pid, err := peer.IDFromPublicKey(pubKey)
+		pid, err := peer.IDFromPrivateKey(privKey)
 		if err != nil {
 			return nil, err
 		}
 
-		if pid.Pretty() == k {
+		if targetPid == pid {
 			return privKey, nil
 		}
 	}

@@ -1,30 +1,37 @@
-// +build !nofuse
+//go:build !nofuse && !openbsd && !netbsd && !plan9
+// +build !nofuse,!openbsd,!netbsd,!plan9
 
 package readonly
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"os"
-	"path"
+	gopath "path"
+	"strings"
 	"sync"
 	"testing"
 
-	core "github.com/ipfs/go-ipfs/core"
-	coreunix "github.com/ipfs/go-ipfs/core/coreunix"
-	coremock "github.com/ipfs/go-ipfs/core/mock"
-	dag "gx/ipfs/QmYxX4VfVcxmfsj8U6T5kVtFvHsSidy9tmPyPTW5fy7H3q/go-merkledag"
-	importer "gx/ipfs/QmagwbbPqiN1oa3SDMZvpTFE5tNuegF1ULtuJvA9EVzsJv/go-unixfs/importer"
-	uio "gx/ipfs/QmagwbbPqiN1oa3SDMZvpTFE5tNuegF1ULtuJvA9EVzsJv/go-unixfs/io"
+	"bazil.org/fuse"
 
-	u "gx/ipfs/QmPdKqUcHGFdeSpvjVoaTRPPstGif9GBZb5Q56RVw9o69A/go-ipfs-util"
-	fstest "gx/ipfs/QmSJBsmLP1XMjv8hxYg2rUMdPDB7YUpyBo9idjrJ6Cmq6F/fuse/fs/fstestutil"
-	ipld "gx/ipfs/QmUSyMZ8Vt4vTZr5HdDEgEfpwAXfQRuDdfCFTt7XBzhxpQ/go-ipld-format"
-	ci "gx/ipfs/QmXG74iiKQnDstVQq9fPFQEB6JTNSWBbAWE1qsq6L4E5sR/go-testutil/ci"
-	chunker "gx/ipfs/Qme4ThG6LN6EMrMYyf2AMywAZaGbTYxQu4njfcSSkcisLi/go-ipfs-chunker"
+	core "github.com/ipfs/kubo/core"
+	coreapi "github.com/ipfs/kubo/core/coreapi"
+	coremock "github.com/ipfs/kubo/core/mock"
+
+	fstest "bazil.org/fuse/fs/fstestutil"
+	chunker "github.com/ipfs/boxo/chunker"
+	"github.com/ipfs/boxo/files"
+	dag "github.com/ipfs/boxo/ipld/merkledag"
+	importer "github.com/ipfs/boxo/ipld/unixfs/importer"
+	uio "github.com/ipfs/boxo/ipld/unixfs/io"
+	"github.com/ipfs/boxo/path"
+	u "github.com/ipfs/boxo/util"
+	ipld "github.com/ipfs/go-ipld-format"
+	ci "github.com/libp2p/go-libp2p-testing/ci"
 )
 
 func maybeSkipFuseTests(t *testing.T) {
@@ -35,7 +42,10 @@ func maybeSkipFuseTests(t *testing.T) {
 
 func randObj(t *testing.T, nd *core.IpfsNode, size int64) (ipld.Node, []byte) {
 	buf := make([]byte, size)
-	u.NewTimeSeededRand().Read(buf)
+	_, err := io.ReadFull(u.NewTimeSeededRand(), buf)
+	if err != nil {
+		t.Fatal(err)
+	}
 	read := bytes.NewReader(buf)
 	obj, err := importer.BuildTrickleDagFromReader(nd.DAG, chunker.DefaultSplitter(read))
 	if err != nil {
@@ -46,6 +56,7 @@ func randObj(t *testing.T, nd *core.IpfsNode, size int64) (ipld.Node, []byte) {
 }
 
 func setupIpfsTest(t *testing.T, node *core.IpfsNode) (*core.IpfsNode, *fstest.Mount) {
+	t.Helper()
 	maybeSkipFuseTests(t)
 
 	var err error
@@ -58,14 +69,17 @@ func setupIpfsTest(t *testing.T, node *core.IpfsNode) (*core.IpfsNode, *fstest.M
 
 	fs := NewFileSystem(node)
 	mnt, err := fstest.MountedT(t, fs, nil)
+	if err == fuse.ErrOSXFUSENotFound {
+		t.Skip(err)
+	}
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("error mounting temporary directory: %v", err)
 	}
 
 	return node, mnt
 }
 
-// Test writing an object and reading it back through fuse
+// Test writing an object and reading it back through fuse.
 func TestIpfsBasicRead(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
@@ -75,8 +89,8 @@ func TestIpfsBasicRead(t *testing.T) {
 
 	fi, data := randObj(t, nd, 10000)
 	k := fi.Cid()
-	fname := path.Join(mnt.Dir, k.String())
-	rbuf, err := ioutil.ReadFile(fname)
+	fname := gopath.Join(mnt.Dir, k.String())
+	rbuf, err := os.ReadFile(fname)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,19 +116,24 @@ func getPaths(t *testing.T, ipfs *core.IpfsNode, name string, n *dag.ProtoNode) 
 			t.Fatal(dag.ErrNotProtobuf)
 		}
 
-		sub := getPaths(t, ipfs, path.Join(name, lnk.Name), childpb)
+		sub := getPaths(t, ipfs, gopath.Join(name, lnk.Name), childpb)
 		out = append(out, sub...)
 	}
 	return out
 }
 
-// Perform a large number of concurrent reads to stress the system
+// Perform a large number of concurrent reads to stress the system.
 func TestIpfsStressRead(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
 	}
 	nd, mnt := setupIpfsTest(t, nil)
 	defer mnt.Close()
+
+	api, err := coreapi.NewCoreAPI(nd)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var nodes []ipld.Node
 	var paths []string
@@ -165,22 +184,35 @@ func TestIpfsStressRead(t *testing.T) {
 			defer wg.Done()
 
 			for i := 0; i < 2000; i++ {
-				item := paths[rand.Intn(len(paths))]
-				fname := path.Join(mnt.Dir, item)
-				rbuf, err := ioutil.ReadFile(fname)
+				item, err := path.NewPath(paths[rand.Intn(len(paths))])
+				if err != nil {
+					errs <- err
+					continue
+				}
+
+				relpath := strings.Replace(item.String(), item.Namespace(), "", 1)
+				fname := gopath.Join(mnt.Dir, relpath)
+
+				rbuf, err := os.ReadFile(fname)
 				if err != nil {
 					errs <- err
 				}
 
-				read, err := coreunix.Cat(nd.Context(), nd, item)
+				// nd.Context() is never closed which leads to
+				// hitting 8128 goroutine limit in go test -race mode
+				ctx, cancelFunc := context.WithCancel(context.Background())
+
+				read, err := api.Unixfs().Get(ctx, item)
 				if err != nil {
 					errs <- err
 				}
 
-				data, err := ioutil.ReadAll(read)
+				data, err := io.ReadAll(read.(files.File))
 				if err != nil {
 					errs <- err
 				}
+
+				cancelFunc()
 
 				if !bytes.Equal(rbuf, data) {
 					errs <- errors.New("incorrect read")
@@ -201,7 +233,7 @@ func TestIpfsStressRead(t *testing.T) {
 	}
 }
 
-// Test writing a file and reading it back
+// Test writing a file and reading it back.
 func TestIpfsBasicDirRead(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
@@ -229,14 +261,14 @@ func TestIpfsBasicDirRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dirname := path.Join(mnt.Dir, d1nd.Cid().String())
-	fname := path.Join(dirname, "actual")
-	rbuf, err := ioutil.ReadFile(fname)
+	dirname := gopath.Join(mnt.Dir, d1nd.Cid().String())
+	fname := gopath.Join(dirname, "actual")
+	rbuf, err := os.ReadFile(fname)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	dirents, err := ioutil.ReadDir(dirname)
+	dirents, err := os.ReadDir(dirname)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +284,7 @@ func TestIpfsBasicDirRead(t *testing.T) {
 	}
 }
 
-// Test to make sure the filesystem reports file sizes correctly
+// Test to make sure the filesystem reports file sizes correctly.
 func TestFileSizeReporting(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
@@ -263,7 +295,7 @@ func TestFileSizeReporting(t *testing.T) {
 	fi, data := randObj(t, nd, 10000)
 	k := fi.Cid()
 
-	fname := path.Join(mnt.Dir, k.String())
+	fname := gopath.Join(mnt.Dir, k.String())
 
 	finfo, err := os.Stat(fname)
 	if err != nil {

@@ -1,6 +1,8 @@
 # FUSE
 
-`go-ipfs` makes it possible to mount `/ipfs` and `/ipns` namespaces in your OS,
+**EXPERIMENTAL:** FUSE support is limited, YMMV.
+
+Kubo makes it possible to mount `/ipfs` and `/ipns` namespaces in your OS,
 allowing arbitrary apps access to IPFS.
 
 ## Install FUSE
@@ -17,7 +19,8 @@ Install `fuse` with your favorite package manager:
 sudo apt-get install fuse
 ```
 
-Add the user which will be running IPFS daemon to the `fuse` group:
+On some older Linux distributions, you may need to add yourself to the `fuse` group.  
+(If no such group exists, you can probably skip this step)
 ```sh
 sudo usermod -a -G fuse <username>
 ```
@@ -30,7 +33,7 @@ ssh connection or by re-logging to the system.
 It has been discovered that versions of `osxfuse` prior to `2.7.0` will cause a
 kernel panic. For everyone's sake, please upgrade (latest at time of writing is
 `2.7.4`). The installer can be found at https://osxfuse.github.io/. There is
-also a homebrew formula (`brew install osxfuse`) but users report best results
+also a homebrew formula (`brew cask install osxfuse`) but users report best results
 installing from the official OSXFUSE installer package.
 
 Note that `ipfs` attempts an automatic version check on `osxfuse` to prevent you
@@ -61,7 +64,21 @@ sudo chown <username> /ipfs
 sudo chown <username> /ipns
 ```
 
-Depending on whether you are using OSX or Linux, follow the proceeding instructions.
+Depending on whether you are using OSX or Linux, follow the proceeding instructions. 
+
+## Make sure IPFS daemon is not running
+
+You'll need to stop the IPFS daemon if you have it started, otherwise the mount will complain. 
+
+```
+# Check to see if IPFS daemon is running
+ps aux | grep ipfs
+
+# Kill the IPFS daemon 
+pkill -f ipfs
+
+# Verify that it has been killed
+```
 
 ## Mounting IPFS
 
@@ -128,6 +145,16 @@ set for user running `ipfs mount` command.
 ```
 sudo umount /ipfs
 sudo umount /ipns
+```
+
+#### Mounting fails with "error mounting: could not resolve name"
+
+Make sure your node's IPNS address has a directory published:
+```
+$ mkdir hello/; echo 'hello' > hello/hello.txt; ipfs add -rQ ./hello/
+QmU5PLEGqjetW4RAmXgHpEFL7nVCL3vFnEyrCKUfRk4MSq
+
+$ ipfs name publish QmU5PLEGqjetW4RAmXgHpEFL7nVCL3vFnEyrCKUfRk4MSq
 ```
 
 If you manage to mount on other systems (or followed an alternative path to one

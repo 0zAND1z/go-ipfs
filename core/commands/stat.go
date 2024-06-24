@@ -1,22 +1,22 @@
 package commands
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"time"
 
-	humanize "gx/ipfs/QmPSBJL4momYnE7DcUyk2DVhD6rH488ZmHBGLbxNdhU44K/go-humanize"
-	cmdkit "gx/ipfs/QmPVqQHEfLpqK7JLCsUkyam7rhuV3MAeZ9gueQQCrBwCta/go-ipfs-cmdkit"
-	cmds "gx/ipfs/QmUQb3xtNzkQCgTj2NjaqcJZNv2nfSSub2QAdy9DtQMRBT/go-ipfs-cmds"
-	metrics "gx/ipfs/QmWne2EKHBvVpSTYuWuWch3D9KqAx78Te83UXWFKQDcksJ/go-libp2p-metrics"
-	protocol "gx/ipfs/QmZNkThpqfVXs9GNbexPrfBbXSLNYeKrE7jwFM2oqHbyqN/go-libp2p-protocol"
-	peer "gx/ipfs/QmcZSzKEM5yDfpZbeEEZaVmaZ1zXm6JWTbrQZSB8hCVPzk/go-libp2p-peer"
+	cmdenv "github.com/ipfs/kubo/core/commands/cmdenv"
+
+	humanize "github.com/dustin/go-humanize"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	metrics "github.com/libp2p/go-libp2p/core/metrics"
+	peer "github.com/libp2p/go-libp2p/core/peer"
+	protocol "github.com/libp2p/go-libp2p/core/protocol"
 )
 
 var StatsCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
+	Helptext: cmds.HelpText{
 		Tagline: "Query IPFS statistics.",
 		ShortDescription: `'ipfs stats' is a set of commands to help look at statistics
 for your IPFS node.
@@ -29,12 +29,21 @@ for your IPFS node.`,
 		"bw":      statBwCmd,
 		"repo":    repoStatCmd,
 		"bitswap": bitswapStatCmd,
+		"dht":     statDhtCmd,
+		"provide": statProvideCmd,
 	},
 }
 
+const (
+	statPeerOptionName     = "peer"
+	statProtoOptionName    = "proto"
+	statPollOptionName     = "poll"
+	statIntervalOptionName = "interval"
+)
+
 var statBwCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Print ipfs bandwidth information.",
+	Helptext: cmds.HelpText{
+		Tagline: "Print IPFS bandwidth information.",
 		ShortDescription: `'ipfs stats bw' prints bandwidth information for the ipfs daemon.
 It displays: TotalIn, TotalOut, RateIn, RateOut.
 		`,
@@ -69,115 +78,110 @@ Example:
     RateOut: 0B/s
 `,
 	},
-	Options: []cmdkit.Option{
-		cmdkit.StringOption("peer", "p", "Specify a peer to print bandwidth for."),
-		cmdkit.StringOption("proto", "t", "Specify a protocol to print bandwidth for."),
-		cmdkit.BoolOption("poll", "Print bandwidth at an interval."),
-		cmdkit.StringOption("interval", "i", `Time interval to wait between updating output, if 'poll' is true.
+	Options: []cmds.Option{
+		cmds.StringOption(statPeerOptionName, "p", "Specify a peer to print bandwidth for."),
+		cmds.StringOption(statProtoOptionName, "t", "Specify a protocol to print bandwidth for."),
+		cmds.BoolOption(statPollOptionName, "Print bandwidth at an interval."),
+		cmds.StringOption(statIntervalOptionName, "i", `Time interval to wait between updating output, if 'poll' is true.
 
     This accepts durations such as "300s", "1.5h" or "2h45m". Valid time units are:
     "ns", "us" (or "µs"), "ms", "s", "m", "h".`).WithDefault("1s"),
 	},
 
-	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) {
-		nd, err := GetNode(env)
+	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+		nd, err := cmdenv.GetNode(env)
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
 		// Must be online!
-		if !nd.OnlineMode() {
-			res.SetError(errNotOnline, cmdkit.ErrClient)
-			return
+		if !nd.IsOnline {
+			return cmds.Errorf(cmds.ErrClient, ErrNotOnline.Error())
 		}
 
 		if nd.Reporter == nil {
-			res.SetError(fmt.Errorf("bandwidth reporter disabled in config"), cmdkit.ErrNormal)
-			return
+			return fmt.Errorf("bandwidth reporter disabled in config")
 		}
 
-		pstr, pfound := req.Options["peer"].(string)
+		pstr, pfound := req.Options[statPeerOptionName].(string)
 		tstr, tfound := req.Options["proto"].(string)
 		if pfound && tfound {
-			res.SetError(errors.New("please only specify peer OR protocol"), cmdkit.ErrClient)
-			return
+			return cmds.Errorf(cmds.ErrClient, "please only specify peer OR protocol")
 		}
 
 		var pid peer.ID
 		if pfound {
-			checkpid, err := peer.IDB58Decode(pstr)
+			checkpid, err := peer.Decode(pstr)
 			if err != nil {
-				res.SetError(err, cmdkit.ErrNormal)
-				return
+				return err
 			}
 			pid = checkpid
 		}
 
-		timeS, _ := req.Options["interval"].(string)
+		timeS, _ := req.Options[statIntervalOptionName].(string)
 		interval, err := time.ParseDuration(timeS)
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		doPoll, _ := req.Options["poll"].(bool)
+		doPoll, _ := req.Options[statPollOptionName].(bool)
 		for {
 			if pfound {
 				stats := nd.Reporter.GetBandwidthForPeer(pid)
-				res.Emit(&stats)
+				if err := res.Emit(&stats); err != nil {
+					return err
+				}
 			} else if tfound {
-				protoId := protocol.ID(tstr)
-				stats := nd.Reporter.GetBandwidthForProtocol(protoId)
-				res.Emit(&stats)
+				protoID := protocol.ID(tstr)
+				stats := nd.Reporter.GetBandwidthForProtocol(protoID)
+				if err := res.Emit(&stats); err != nil {
+					return err
+				}
 			} else {
 				totals := nd.Reporter.GetBandwidthTotals()
-				res.Emit(&totals)
+				if err := res.Emit(&totals); err != nil {
+					return err
+				}
 			}
 			if !doPoll {
-				return
+				return nil
 			}
 			select {
 			case <-time.After(interval):
 			case <-req.Context.Done():
-				return
+				return req.Context.Err()
 			}
 		}
-
 	},
 	Type: metrics.Stats{},
 	PostRun: cmds.PostRunMap{
-		cmds.CLI: func(req *cmds.Request, re cmds.ResponseEmitter) cmds.ResponseEmitter {
-			reNext, res := cmds.NewChanResponsePair(req)
+		cmds.CLI: func(res cmds.Response, re cmds.ResponseEmitter) error {
+			polling, _ := res.Request().Options[statPollOptionName].(bool)
 
-			go func() {
-				defer re.Close()
-
-				polling, _ := res.Request().Options["poll"].(bool)
-				if polling {
-					fmt.Fprintln(os.Stdout, "Total Up    Total Down  Rate Up     Rate Down")
-				}
-				for {
-					v, err := res.Next()
-					if !cmds.HandleError(err, res, re) {
-						break
+			if polling {
+				fmt.Fprintln(os.Stdout, "Total Up    Total Down  Rate Up     Rate Down")
+			}
+			for {
+				v, err := res.Next()
+				if err != nil {
+					if err == io.EOF {
+						return nil
 					}
-
-					bs := v.(*metrics.Stats)
-
-					if !polling {
-						printStats(os.Stdout, bs)
-						return
-					}
-
-					fmt.Fprintf(os.Stdout, "%8s    ", humanize.Bytes(uint64(bs.TotalOut)))
-					fmt.Fprintf(os.Stdout, "%8s    ", humanize.Bytes(uint64(bs.TotalIn)))
-					fmt.Fprintf(os.Stdout, "%8s/s  ", humanize.Bytes(uint64(bs.RateOut)))
-					fmt.Fprintf(os.Stdout, "%8s/s      \r", humanize.Bytes(uint64(bs.RateIn)))
+					return err
 				}
-			}()
 
-			return reNext
+				bs := v.(*metrics.Stats)
+
+				if !polling {
+					printStats(os.Stdout, bs)
+					return nil
+				}
+
+				fmt.Fprintf(os.Stdout, "%8s    ", humanize.Bytes(uint64(bs.TotalOut)))
+				fmt.Fprintf(os.Stdout, "%8s    ", humanize.Bytes(uint64(bs.TotalIn)))
+				fmt.Fprintf(os.Stdout, "%8s/s  ", humanize.Bytes(uint64(bs.RateOut)))
+				fmt.Fprintf(os.Stdout, "%8s/s      \r", humanize.Bytes(uint64(bs.RateIn)))
+			}
 		},
 	},
 }

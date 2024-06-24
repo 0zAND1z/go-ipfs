@@ -2,276 +2,177 @@ package core
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"errors"
-	"os"
-	"syscall"
+	"fmt"
+	"reflect"
+	"sync"
 	"time"
 
-	filestore "github.com/ipfs/go-ipfs/filestore"
-	pin "github.com/ipfs/go-ipfs/pin"
-	repo "github.com/ipfs/go-ipfs/repo"
-	cidv0v1 "github.com/ipfs/go-ipfs/thirdparty/cidv0v1"
-	"github.com/ipfs/go-ipfs/thirdparty/verifbs"
-	bserv "gx/ipfs/QmQrLuAVriwcPQpqn15GU7gjZGKKa45Hmdj9JCG3Cc45CC/go-blockservice"
-	resolver "gx/ipfs/QmV1W98rBAovVJGkeYHfqJ19JdT9dQbbWsCq9zPaMyrxYx/go-path/resolver"
-	dag "gx/ipfs/QmYxX4VfVcxmfsj8U6T5kVtFvHsSidy9tmPyPTW5fy7H3q/go-merkledag"
-	uio "gx/ipfs/QmagwbbPqiN1oa3SDMZvpTFE5tNuegF1ULtuJvA9EVzsJv/go-unixfs/io"
+	"github.com/ipfs/boxo/bootstrap"
+	"github.com/ipfs/kubo/core/node"
 
-	ci "gx/ipfs/QmPvyPwuCgJ7pDmrKDxRtsScJgBaM5h4EpRL2qQJsmXf4n/go-libp2p-crypto"
-	p2phost "gx/ipfs/QmQ1hwb95uSSZR8jSPJysnfHxBDQAykSXsmz5TwTzxjq2Z/go-libp2p-host"
-	cfg "gx/ipfs/QmRwCaRYotCqXsVZAXwWhEJ8A74iAaKnY7MUe6sDgFjrE5/go-ipfs-config"
-	goprocessctx "gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess/context"
-	offline "gx/ipfs/QmTMhpt5sH5yup2RU5qeFDMZcDf4RaHqba4ztEp7yrzese/go-ipfs-exchange-offline"
-	libp2p "gx/ipfs/QmUDzeFgYrRmHL2hUB6NZmqcBVQtUzETwmFRUc9onfSSHr/go-libp2p"
-	record "gx/ipfs/QmUTQSGgjs8CHm9yBcUHicpRs7C9abhyZiBwjzCUp1pNgX/go-libp2p-record"
-	ds "gx/ipfs/QmVG5gxteQNEMhrS8prJSmU2C9rebtFuTd3SYZ5kE3YZ5k/go-datastore"
-	retry "gx/ipfs/QmVG5gxteQNEMhrS8prJSmU2C9rebtFuTd3SYZ5kE3YZ5k/go-datastore/retrystore"
-	dsync "gx/ipfs/QmVG5gxteQNEMhrS8prJSmU2C9rebtFuTd3SYZ5kE3YZ5k/go-datastore/sync"
-	ipns "gx/ipfs/QmVHij7PuWUFeLcmRbD1ykDwB1WZMYP8yixo9bprUb3QHG/go-ipns"
-	pstore "gx/ipfs/QmYLXCWN2myozZpx8Wx4UjrRuQuhY3YtWoMi6SHaXii6aM/go-libp2p-peerstore"
-	peer "gx/ipfs/QmcZSzKEM5yDfpZbeEEZaVmaZ1zXm6JWTbrQZSB8hCVPzk/go-libp2p-peer"
-	bstore "gx/ipfs/QmeFZ47hGe5T8nSUjwd6zf6ikzFWYEzWsb1e4Q2r6n1w9z/go-ipfs-blockstore"
-	metrics "gx/ipfs/QmekzFM3hPZjTjUFGTABdQkEnQ3PTiMstY198PwSFr5w1Q/go-metrics-interface"
+	"github.com/ipfs/go-metrics-interface"
+	"go.uber.org/dig"
+	"go.uber.org/fx"
 )
 
-type BuildCfg struct {
-	// If online is set, the node will have networking enabled
-	Online bool
-
-	// ExtraOpts is a map of extra options used to configure the ipfs nodes creation
-	ExtraOpts map[string]bool
-
-	// If permanent then node should run more expensive processes
-	// that will improve performance in long run
-	Permanent bool
-
-	// DisableEncryptedConnections disables connection encryption *entirely*.
-	// DO NOT SET THIS UNLESS YOU'RE TESTING.
-	DisableEncryptedConnections bool
-
-	// If NilRepo is set, a repo backed by a nil datastore will be constructed
-	NilRepo bool
-
-	Routing RoutingOption
-	Host    HostOption
-	Repo    repo.Repo
+// FXNodeInfo contains information useful for adding fx options.
+// This is the extension point for providing more info/context to fx plugins
+// to make decisions about what options to include.
+type FXNodeInfo struct {
+	FXOptions []fx.Option
 }
 
-func (cfg *BuildCfg) getOpt(key string) bool {
-	if cfg.ExtraOpts == nil {
-		return false
-	}
+// fxOptFunc takes in some info about the IPFS node and returns the full set of fx opts to use.
+type fxOptFunc func(FXNodeInfo) ([]fx.Option, error)
 
-	return cfg.ExtraOpts[key]
+var fxOptionFuncs []fxOptFunc
+
+// RegisterFXOptionFunc registers a function that is run before the fx app is initialized.
+// Functions are invoked in the order they are registered,
+// and the resulting options are passed into the next function's FXNodeInfo.
+//
+// Note that these are applied globally, by all invocations of NewNode.
+// There are multiple places in Kubo that construct nodes, such as:
+//   - Repo initialization
+//   - Daemon initialization
+//   - When running migrations
+//   - etc.
+//
+// If your fx options are doing anything sophisticated, you should keep this in mind.
+//
+// For example, if you plug in a blockservice that disallows non-allowlisted CIDs,
+// this may break migrations that fetch migration code over IPFS.
+func RegisterFXOptionFunc(optFunc fxOptFunc) {
+	fxOptionFuncs = append(fxOptionFuncs, optFunc)
 }
 
-func (cfg *BuildCfg) fillDefaults() error {
-	if cfg.Repo != nil && cfg.NilRepo {
-		return errors.New("cannot set a repo and specify nilrepo at the same time")
-	}
-
-	if cfg.Repo == nil {
-		var d ds.Datastore
-		d = ds.NewMapDatastore()
-
-		if cfg.NilRepo {
-			d = ds.NewNullDatastore()
-		}
-		r, err := defaultRepo(dsync.MutexWrap(d))
-		if err != nil {
-			return err
-		}
-		cfg.Repo = r
-	}
-
-	if cfg.Routing == nil {
-		cfg.Routing = DHTOption
-	}
-
-	if cfg.Host == nil {
-		cfg.Host = DefaultHostOption
-	}
-
-	return nil
+// from https://stackoverflow.com/a/59348871
+type valueContext struct {
+	context.Context
 }
 
-func defaultRepo(dstore repo.Datastore) (repo.Repo, error) {
-	c := cfg.Config{}
-	priv, pub, err := ci.GenerateKeyPairWithReader(ci.RSA, 1024, rand.Reader)
-	if err != nil {
-		return nil, err
-	}
+func (valueContext) Deadline() (deadline time.Time, ok bool) { return }
+func (valueContext) Done() <-chan struct{}                   { return nil }
+func (valueContext) Err() error                              { return nil }
 
-	pid, err := peer.IDFromPublicKey(pub)
-	if err != nil {
-		return nil, err
-	}
-
-	privkeyb, err := priv.Bytes()
-	if err != nil {
-		return nil, err
-	}
-
-	c.Bootstrap = cfg.DefaultBootstrapAddresses
-	c.Addresses.Swarm = []string{"/ip4/0.0.0.0/tcp/4001"}
-	c.Identity.PeerID = pid.Pretty()
-	c.Identity.PrivKey = base64.StdEncoding.EncodeToString(privkeyb)
-
-	return &repo.Mock{
-		D: dstore,
-		C: c,
-	}, nil
-}
+type BuildCfg = node.BuildCfg // Alias for compatibility until we properly refactor the constructor interface
 
 // NewNode constructs and returns an IpfsNode using the given cfg.
 func NewNode(ctx context.Context, cfg *BuildCfg) (*IpfsNode, error) {
-	if cfg == nil {
-		cfg = new(BuildCfg)
-	}
+	// save this context as the "lifetime" ctx.
+	lctx := ctx
 
-	err := cfg.fillDefaults()
-	if err != nil {
-		return nil, err
-	}
+	// derive a new context that ignores cancellations from the lifetime ctx.
+	ctx, cancel := context.WithCancel(valueContext{ctx})
 
+	// add a metrics scope.
 	ctx = metrics.CtxScope(ctx, "ipfs")
 
 	n := &IpfsNode{
-		mode:      offlineMode,
-		Repo:      cfg.Repo,
-		ctx:       ctx,
-		Peerstore: pstore.NewPeerstore(),
+		ctx: ctx,
 	}
 
-	n.RecordValidator = record.NamespacedValidator{
-		"pk":   record.PublicKeyValidator{},
-		"ipns": ipns.Validator{KeyBook: n.Peerstore},
+	opts := []fx.Option{
+		node.IPFS(ctx, cfg),
+		fx.NopLogger,
+	}
+	for _, optFunc := range fxOptionFuncs {
+		var err error
+		opts, err = optFunc(FXNodeInfo{FXOptions: opts})
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("building fx opts: %w", err)
+		}
+	}
+	//nolint:staticcheck // https://github.com/ipfs/kubo/pull/9423#issuecomment-1341038770
+	opts = append(opts, fx.Extract(n))
+
+	app := fx.New(opts...)
+
+	var once sync.Once
+	var stopErr error
+	n.stop = func() error {
+		once.Do(func() {
+			stopErr = app.Stop(context.Background())
+			if stopErr != nil {
+				log.Error("failure on stop: ", stopErr)
+			}
+			// Cancel the context _after_ the app has stopped.
+			cancel()
+		})
+		return stopErr
+	}
+	n.IsOnline = cfg.Online
+
+	go func() {
+		// Shut down the application if the lifetime context is canceled.
+		// NOTE: we _should_ stop the application by calling `Close()`
+		// on the process. But we currently manage everything with contexts.
+		select {
+		case <-lctx.Done():
+			err := n.stop()
+			if err != nil {
+				log.Error("failure on stop: ", err)
+			}
+		case <-ctx.Done():
+		}
+	}()
+
+	if app.Err() != nil {
+		return nil, logAndUnwrapFxError(app.Err())
 	}
 
-	if cfg.Online {
-		n.mode = onlineMode
+	if err := app.Start(ctx); err != nil {
+		return nil, logAndUnwrapFxError(err)
 	}
 
-	// TODO: this is a weird circular-ish dependency, rework it
-	n.proc = goprocessctx.WithContextAndTeardown(ctx, n.teardown)
-
-	if err := setupNode(ctx, n, cfg); err != nil {
-		n.Close()
-		return nil, err
+	// TODO: How soon will bootstrap move to libp2p?
+	if !cfg.Online {
+		return n, nil
 	}
 
-	return n, nil
+	return n, n.Bootstrap(bootstrap.DefaultBootstrapConfig)
 }
 
-func isTooManyFDError(err error) bool {
-	perr, ok := err.(*os.PathError)
-	if ok && perr.Err == syscall.EMFILE {
-		return true
+// Log the entire `app.Err()` but return only the innermost one to the user
+// given the full error can be very long (as it can expose the entire build
+// graph in a single string).
+//
+// The fx.App error exposed through `app.Err()` normally contains un-exported
+// errors from its low-level `dig` package:
+// * https://github.com/uber-go/dig/blob/5e5a20d/error.go#L82
+// These usually wrap themselves in many layers to expose where in the build
+// chain did the error happen. Although useful for a developer that needs to
+// debug it, it can be very confusing for a user that just wants the IPFS error
+// that he can probably fix without being aware of the entire chain.
+// Unwrapping everything is not the best solution as there can be useful
+// information in the intermediate errors, mainly in the next to last error
+// that locates which component is the build error coming from, but it's the
+// best we can do at the moment given all errors in dig are private and we
+// just have the generic `RootCause` API.
+func logAndUnwrapFxError(fxAppErr error) error {
+	if fxAppErr == nil {
+		return nil
 	}
 
-	return false
-}
+	log.Error("constructing the node: ", fxAppErr)
 
-func setupNode(ctx context.Context, n *IpfsNode, cfg *BuildCfg) error {
-	// setup local peer ID (private key is loaded in online setup)
-	if err := n.loadID(); err != nil {
-		return err
-	}
-
-	rds := &retry.Datastore{
-		Batching:    n.Repo.Datastore(),
-		Delay:       time.Millisecond * 200,
-		Retries:     6,
-		TempErrFunc: isTooManyFDError,
-	}
-
-	// hash security
-	bs := bstore.NewBlockstore(rds)
-	bs = &verifbs.VerifBS{Blockstore: bs}
-
-	opts := bstore.DefaultCacheOpts()
-	conf, err := n.Repo.Config()
-	if err != nil {
-		return err
-	}
-
-	// TEMP: setting global sharding switch here
-	uio.UseHAMTSharding = conf.Experimental.ShardingEnabled
-
-	opts.HasBloomFilterSize = conf.Datastore.BloomFilterSize
-	if !cfg.Permanent {
-		opts.HasBloomFilterSize = 0
-	}
-
-	wbs, err := bstore.CachedBlockstore(ctx, bs, opts)
-	if err != nil {
-		return err
-	}
-
-	wbs = bstore.NewIdStore(wbs)
-
-	wbs = cidv0v1.NewBlockstore(wbs)
-
-	n.BaseBlocks = wbs
-	n.GCLocker = bstore.NewGCLocker()
-	n.Blockstore = bstore.NewGCBlockstore(wbs, n.GCLocker)
-
-	if conf.Experimental.FilestoreEnabled || conf.Experimental.UrlstoreEnabled {
-		// hash security
-		n.Filestore = filestore.NewFilestore(wbs, n.Repo.FileManager())
-		n.Blockstore = bstore.NewGCBlockstore(n.Filestore, n.GCLocker)
-		n.Blockstore = &verifbs.VerifBSGC{GCBlockstore: n.Blockstore}
-	}
-
-	rcfg, err := n.Repo.Config()
-	if err != nil {
-		return err
-	}
-
-	if rcfg.Datastore.HashOnRead {
-		bs.HashOnRead(true)
-	}
-
-	hostOption := cfg.Host
-	if cfg.DisableEncryptedConnections {
-		innerHostOption := hostOption
-		hostOption = func(ctx context.Context, id peer.ID, ps pstore.Peerstore, options ...libp2p.Option) (p2phost.Host, error) {
-			return innerHostOption(ctx, id, ps, append(options, libp2p.NoSecurity)...)
+	err := fxAppErr
+	for {
+		extractedErr := dig.RootCause(err)
+		// Note that the `RootCause` name is misleading as it just unwraps only
+		// *one* error layer at a time, so we need to continuously call it.
+		if !reflect.TypeOf(extractedErr).Comparable() {
+			// Some internal errors are not comparable (e.g., `dig.errMissingTypes`
+			// which is a slice) and we can't go further.
+			break
 		}
-		log.Warningf(`Your IPFS node has been configured to run WITHOUT ENCRYPTED CONNECTIONS.
-		You will not be able to connect to any nodes configured to use encrypted connections`)
-	}
-
-	if cfg.Online {
-		do := setupDiscoveryOption(rcfg.Discovery)
-		if err := n.startOnlineServices(ctx, cfg.Routing, hostOption, do, cfg.getOpt("pubsub"), cfg.getOpt("ipnsps"), cfg.getOpt("mplex")); err != nil {
-			return err
+		if extractedErr == err {
+			// We didn't unwrap any new error in the last call, reached the innermost one.
+			break
 		}
-	} else {
-		n.Exchange = offline.Exchange(n.Blockstore)
+		err = extractedErr
 	}
 
-	n.Blocks = bserv.New(n.Blockstore, n.Exchange)
-	n.DAG = dag.NewDAGService(n.Blocks)
-
-	internalDag := dag.NewDAGService(bserv.New(n.Blockstore, offline.Exchange(n.Blockstore)))
-	n.Pinning, err = pin.LoadPinner(n.Repo.Datastore(), n.DAG, internalDag)
-	if err != nil {
-		// TODO: we should move towards only running 'NewPinner' explicitly on
-		// node init instead of implicitly here as a result of the pinner keys
-		// not being found in the datastore.
-		// this is kinda sketchy and could cause data loss
-		n.Pinning = pin.NewPinner(n.Repo.Datastore(), n.DAG, internalDag)
-	}
-	n.Resolver = resolver.NewBasicResolver(n.DAG)
-
-	if cfg.Online {
-		if err := n.startLateOnlineServices(ctx); err != nil {
-			return err
-		}
-	}
-
-	return n.loadFilesRoot()
+	return fmt.Errorf("constructing the node (see log for full detail): %w", err)
 }

@@ -1,23 +1,22 @@
-// +build !nofuse
+//go:build !openbsd && !nofuse && !netbsd && !plan9
+// +build !openbsd,!nofuse,!netbsd,!plan9
 
 package node
 
 import (
-	"io/ioutil"
+	"context"
 	"os"
-	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
-	"context"
+	"bazil.org/fuse"
 
-	core "github.com/ipfs/go-ipfs/core"
-	ipns "github.com/ipfs/go-ipfs/fuse/ipns"
-	mount "github.com/ipfs/go-ipfs/fuse/mount"
-	namesys "github.com/ipfs/go-ipfs/namesys"
+	core "github.com/ipfs/kubo/core"
+	ipns "github.com/ipfs/kubo/fuse/ipns"
+	mount "github.com/ipfs/kubo/fuse/mount"
 
-	ci "gx/ipfs/QmXG74iiKQnDstVQq9fPFQEB6JTNSWBbAWE1qsq6L4E5sR/go-testutil/ci"
-	offroute "gx/ipfs/QmYey7kzAAqmXXbr38qH4oGGkB5m5swJeJCQfHgt8nrDES/go-ipfs-routing/offline"
+	ci "github.com/libp2p/go-libp2p-testing/ci"
 )
 
 func maybeSkipFuseTests(t *testing.T) {
@@ -33,7 +32,7 @@ func mkdir(t *testing.T, path string) {
 	}
 }
 
-// Test externally unmounting, then trying to unmount in code
+// Test externally unmounting, then trying to unmount in code.
 func TestExternalUnmount(t *testing.T) {
 	if testing.Short() {
 		t.SkipNow()
@@ -42,29 +41,18 @@ func TestExternalUnmount(t *testing.T) {
 	// TODO: needed?
 	maybeSkipFuseTests(t)
 
-	node, err := core.NewNode(context.Background(), nil)
+	node, err := core.NewNode(context.Background(), &core.BuildCfg{})
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	err = node.LoadPrivateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	node.Routing = offroute.NewOfflineRouter(node.Repo.Datastore(), node.RecordValidator)
-	node.Namesys = namesys.NewNameSystem(node.Routing, node.Repo.Datastore(), 0)
 
 	err = ipns.InitializeKeyspace(node, node.PrivateKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// get the test dir paths (/tmp/fusetestXXXX)
-	dir, err := ioutil.TempDir("", "fusetest")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// get the test dir paths (/tmp/TestExternalUnmount)
+	dir := t.TempDir()
 
 	ipfsDir := dir + "/ipfs"
 	ipnsDir := dir + "/ipns"
@@ -73,28 +61,31 @@ func TestExternalUnmount(t *testing.T) {
 
 	err = Mount(node, ipfsDir, ipnsDir)
 	if err != nil {
-		t.Fatal(err)
+		if strings.Contains(err.Error(), "unable to check fuse version") || err == fuse.ErrOSXFUSENotFound {
+			t.Skip(err)
+		}
+	}
+
+	if err != nil {
+		t.Fatalf("error mounting: %v", err)
 	}
 
 	// Run shell command to externally unmount the directory
-	cmd := "fusermount"
-	args := []string{"-u", ipnsDir}
-	if err := exec.Command(cmd, args...).Run(); err != nil {
+	cmd, err := mount.UnmountCmd(ipfsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
 
 	// TODO(noffle): it takes a moment for the goroutine that's running fs.Serve to be notified and do its cleanup.
 	time.Sleep(time.Millisecond * 100)
 
-	// Attempt to unmount IPNS; check that it was already unmounted.
-	err = node.Mounts.Ipns.Unmount()
-	if err != mount.ErrNotMounted {
-		t.Fatal("Unmount should have failed")
-	}
-
 	// Attempt to unmount IPFS; it should unmount successfully.
 	err = node.Mounts.Ipfs.Unmount()
-	if err != nil {
-		t.Fatal(err)
+	if err != mount.ErrNotMounted {
+		t.Fatal("Unmount should have failed")
 	}
 }

@@ -4,53 +4,43 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
-	"io/ioutil"
 
-	util "github.com/ipfs/go-ipfs/blocks/blockstoreutil"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	caopts "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
+	"github.com/ipfs/boxo/path"
+	pin "github.com/ipfs/boxo/pinning/pinner"
+	blocks "github.com/ipfs/go-block-format"
+	cid "github.com/ipfs/go-cid"
+	coreiface "github.com/ipfs/kubo/core/coreiface"
+	caopts "github.com/ipfs/kubo/core/coreiface/options"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
-	mh "gx/ipfs/QmPnFwZ2JXKnXgMw8CdBPxn7FWh6LLdjUjxV1fKHuJnkr8/go-multihash"
-	blocks "gx/ipfs/QmZXvzTJTiN6p469osBUtEwm4WwhXXoWcHC8aTS1cAJkjy/go-block-format"
-	cid "gx/ipfs/Qmdu2AYUV7yMoVBQPxXNfe7FJcdx16kYtsx6jAPKWQYF1y/go-cid"
+	util "github.com/ipfs/kubo/blocks/blockstoreutil"
+	"github.com/ipfs/kubo/tracing"
 )
 
 type BlockAPI CoreAPI
 
 type BlockStat struct {
-	path coreiface.ResolvedPath
+	path path.ImmutablePath
 	size int
 }
 
-func (api *BlockAPI) Put(ctx context.Context, src io.Reader, opts ...caopts.BlockPutOption) (coreiface.ResolvedPath, error) {
+func (api *BlockAPI) Put(ctx context.Context, src io.Reader, opts ...caopts.BlockPutOption) (coreiface.BlockStat, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI.BlockAPI", "Put")
+	defer span.End()
+
 	settings, err := caopts.BlockPutOptions(opts...)
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := ioutil.ReadAll(src)
+	data, err := io.ReadAll(src)
 	if err != nil {
 		return nil, err
 	}
 
-	var pref cid.Prefix
-	pref.Version = 1
-
-	formatval, ok := cid.Codecs[settings.Codec]
-	if !ok {
-		return nil, fmt.Errorf("unrecognized format: %s", settings.Codec)
-	}
-	if settings.Codec == "v0" && settings.MhType == mh.SHA2_256 {
-		pref.Version = 0
-	}
-	pref.Codec = formatval
-
-	pref.MhType = settings.MhType
-	pref.MhLength = settings.MhLength
-
-	bcid, err := pref.Sum(data)
+	bcid, err := settings.CidPrefix.Sum(data)
 	if err != nil {
 		return nil, err
 	}
@@ -60,21 +50,36 @@ func (api *BlockAPI) Put(ctx context.Context, src io.Reader, opts ...caopts.Bloc
 		return nil, err
 	}
 
-	err = api.node.Blocks.AddBlock(b)
+	if settings.Pin {
+		defer api.blockstore.PinLock(ctx).Unlock(ctx)
+	}
+
+	err = api.blocks.AddBlock(ctx, b)
 	if err != nil {
 		return nil, err
 	}
 
-	return coreiface.IpldPath(b.Cid()), nil
+	if settings.Pin {
+		if err = api.pinning.PinWithMode(ctx, b.Cid(), pin.Recursive, ""); err != nil {
+			return nil, err
+		}
+		if err := api.pinning.Flush(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	return &BlockStat{path: path.FromCid(b.Cid()), size: len(data)}, nil
 }
 
-func (api *BlockAPI) Get(ctx context.Context, p coreiface.Path) (io.Reader, error) {
-	rp, err := api.core().ResolvePath(ctx, p)
+func (api *BlockAPI) Get(ctx context.Context, p path.Path) (io.Reader, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI.BlockAPI", "Get", trace.WithAttributes(attribute.String("path", p.String())))
+	defer span.End()
+	rp, _, err := api.core().ResolvePath(ctx, p)
 	if err != nil {
 		return nil, err
 	}
 
-	b, err := api.node.Blocks.GetBlock(ctx, rp.Cid())
+	b, err := api.blocks.GetBlock(ctx, rp.RootCid())
 	if err != nil {
 		return nil, err
 	}
@@ -82,8 +87,11 @@ func (api *BlockAPI) Get(ctx context.Context, p coreiface.Path) (io.Reader, erro
 	return bytes.NewReader(b.RawData()), nil
 }
 
-func (api *BlockAPI) Rm(ctx context.Context, p coreiface.Path, opts ...caopts.BlockRmOption) error {
-	rp, err := api.core().ResolvePath(ctx, p)
+func (api *BlockAPI) Rm(ctx context.Context, p path.Path, opts ...caopts.BlockRmOption) error {
+	ctx, span := tracing.Span(ctx, "CoreAPI.BlockAPI", "Rm", trace.WithAttributes(attribute.String("path", p.String())))
+	defer span.End()
+
+	rp, _, err := api.core().ResolvePath(ctx, p)
 	if err != nil {
 		return err
 	}
@@ -92,10 +100,10 @@ func (api *BlockAPI) Rm(ctx context.Context, p coreiface.Path, opts ...caopts.Bl
 	if err != nil {
 		return err
 	}
-	cids := []*cid.Cid{rp.Cid()}
+	cids := []cid.Cid{rp.RootCid()}
 	o := util.RmBlocksOpts{Force: settings.Force}
 
-	out, err := util.RmBlocks(api.node.Blockstore, api.node.Pinning, cids, o)
+	out, err := util.RmBlocks(ctx, api.blockstore, api.pinning, cids, o)
 	if err != nil {
 		return err
 	}
@@ -111,8 +119,8 @@ func (api *BlockAPI) Rm(ctx context.Context, p coreiface.Path, opts ...caopts.Bl
 			return errors.New("got unexpected output from util.RmBlocks")
 		}
 
-		if remBlock.Error != "" {
-			return errors.New(remBlock.Error)
+		if remBlock.Error != nil {
+			return remBlock.Error
 		}
 		return nil
 	case <-ctx.Done():
@@ -120,19 +128,22 @@ func (api *BlockAPI) Rm(ctx context.Context, p coreiface.Path, opts ...caopts.Bl
 	}
 }
 
-func (api *BlockAPI) Stat(ctx context.Context, p coreiface.Path) (coreiface.BlockStat, error) {
-	rp, err := api.core().ResolvePath(ctx, p)
+func (api *BlockAPI) Stat(ctx context.Context, p path.Path) (coreiface.BlockStat, error) {
+	ctx, span := tracing.Span(ctx, "CoreAPI.BlockAPI", "Stat", trace.WithAttributes(attribute.String("path", p.String())))
+	defer span.End()
+
+	rp, _, err := api.core().ResolvePath(ctx, p)
 	if err != nil {
 		return nil, err
 	}
 
-	b, err := api.node.Blocks.GetBlock(ctx, rp.Cid())
+	b, err := api.blocks.GetBlock(ctx, rp.RootCid())
 	if err != nil {
 		return nil, err
 	}
 
 	return &BlockStat{
-		path: coreiface.IpldPath(b.Cid()),
+		path: path.FromCid(b.Cid()),
 		size: len(b.RawData()),
 	}, nil
 }
@@ -141,7 +152,7 @@ func (bs *BlockStat) Size() int {
 	return bs.size
 }
 
-func (bs *BlockStat) Path() coreiface.ResolvedPath {
+func (bs *BlockStat) Path() path.ImmutablePath {
 	return bs.path
 }
 

@@ -3,11 +3,11 @@ package ipns
 import (
 	"context"
 
-	"github.com/ipfs/go-ipfs/core"
-	nsys "github.com/ipfs/go-ipfs/namesys"
-	ci "gx/ipfs/QmPvyPwuCgJ7pDmrKDxRtsScJgBaM5h4EpRL2qQJsmXf4n/go-libp2p-crypto"
-	path "gx/ipfs/QmV1W98rBAovVJGkeYHfqJ19JdT9dQbbWsCq9zPaMyrxYx/go-path"
-	ft "gx/ipfs/QmagwbbPqiN1oa3SDMZvpTFE5tNuegF1ULtuJvA9EVzsJv/go-unixfs"
+	ft "github.com/ipfs/boxo/ipld/unixfs"
+	"github.com/ipfs/boxo/namesys"
+	"github.com/ipfs/boxo/path"
+	"github.com/ipfs/kubo/core"
+	ci "github.com/libp2p/go-libp2p/core/crypto"
 )
 
 // InitializeKeyspace sets the ipns record for the given key to
@@ -18,17 +18,17 @@ func InitializeKeyspace(n *core.IpfsNode, key ci.PrivKey) error {
 
 	emptyDir := ft.EmptyDirNode()
 
-	err := n.Pinning.Pin(ctx, emptyDir, false)
+	err := n.Pinning.Pin(ctx, emptyDir, false, "")
 	if err != nil {
 		return err
 	}
 
-	err = n.Pinning.Flush()
+	err = n.Pinning.Flush(ctx)
 	if err != nil {
 		return err
 	}
 
-	pub := nsys.NewIpnsPublisher(n.Routing, n.Repo.Datastore())
+	pub := namesys.NewIPNSPublisher(n.Routing, n.Repo.Datastore())
 
 	return pub.Publish(ctx, key, path.FromCid(emptyDir.Cid()))
 }

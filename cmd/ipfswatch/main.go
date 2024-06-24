@@ -1,3 +1,6 @@
+//go:build !plan9
+// +build !plan9
+
 package main
 
 import (
@@ -9,22 +12,23 @@ import (
 	"path/filepath"
 	"syscall"
 
-	commands "github.com/ipfs/go-ipfs/commands"
-	core "github.com/ipfs/go-ipfs/core"
-	corehttp "github.com/ipfs/go-ipfs/core/corehttp"
-	coreunix "github.com/ipfs/go-ipfs/core/coreunix"
-	fsrepo "github.com/ipfs/go-ipfs/repo/fsrepo"
-	config "gx/ipfs/QmRwCaRYotCqXsVZAXwWhEJ8A74iAaKnY7MUe6sDgFjrE5/go-ipfs-config"
+	commands "github.com/ipfs/kubo/commands"
+	core "github.com/ipfs/kubo/core"
+	coreapi "github.com/ipfs/kubo/core/coreapi"
+	corehttp "github.com/ipfs/kubo/core/corehttp"
+	fsrepo "github.com/ipfs/kubo/repo/fsrepo"
 
-	homedir "github.com/ipfs/go-ipfs/Godeps/_workspace/src/github.com/mitchellh/go-homedir"
-
-	process "gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
-	fsnotify "gx/ipfs/QmfNjggF4Pt6erqg3NDafD3MdvDHk1qqCVr8pL5hnPucS8/fsnotify"
+	fsnotify "github.com/fsnotify/fsnotify"
+	"github.com/ipfs/boxo/files"
+	process "github.com/jbenet/goprocess"
+	homedir "github.com/mitchellh/go-homedir"
 )
 
-var http = flag.Bool("http", false, "expose IPFS HTTP API")
-var repoPath = flag.String("repo", os.Getenv("IPFS_PATH"), "IPFS_PATH to use")
-var watchPath = flag.String("path", ".", "the path to watch")
+var (
+	http      = flag.Bool("http", false, "expose IPFS HTTP API")
+	repoPath  = flag.String("repo", os.Getenv("IPFS_PATH"), "IPFS_PATH to use")
+	watchPath = flag.String("path", ".", "the path to watch")
+)
 
 func main() {
 	flag.Parse()
@@ -50,7 +54,6 @@ func main() {
 }
 
 func run(ipfsPath, watchPath string) error {
-
 	proc := process.WithParent(process.Background())
 	log.Printf("running IPFSWatch on '%s' using repo at '%s'...", watchPath, ipfsPath)
 
@@ -84,10 +87,15 @@ func run(ipfsPath, watchPath string) error {
 	}
 	defer node.Close()
 
+	api, err := coreapi.NewCoreAPI(node)
+	if err != nil {
+		return err
+	}
+
 	if *http {
 		addr := "/ip4/127.0.0.1/tcp/5001"
-		var opts = []corehttp.ServeOption{
-			corehttp.GatewayOption(true, "/ipfs", "/ipns"),
+		opts := []corehttp.ServeOption{
+			corehttp.GatewayOption("/ipfs", "/ipns"),
 			corehttp.WebUIOption,
 			corehttp.CommandsOption(cmdCtx(node, ipfsPath)),
 		}
@@ -98,7 +106,7 @@ func run(ipfsPath, watchPath string) error {
 		})
 	}
 
-	interrupts := make(chan os.Signal)
+	interrupts := make(chan os.Signal, 1)
 	signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM)
 
 	for {
@@ -124,16 +132,32 @@ func run(ipfsPath, watchPath string) error {
 				switch e.Op {
 				case fsnotify.Create:
 					if isDir {
-						addTree(watcher, e.Name)
+						if err := addTree(watcher, e.Name); err != nil {
+							return err
+						}
 					}
 				}
 				proc.Go(func(p process.Process) {
 					file, err := os.Open(e.Name)
 					if err != nil {
 						log.Println(err)
+						return
 					}
 					defer file.Close()
-					k, err := coreunix.Add(node, file)
+
+					st, err := file.Stat()
+					if err != nil {
+						log.Println(err)
+						return
+					}
+
+					f, err := files.NewReaderPathFile(e.Name, file, st)
+					if err != nil {
+						log.Println(err)
+						return
+					}
+
+					k, err := api.Unixfs().Add(node.Context(), f)
 					if err != nil {
 						log.Println(err)
 					}
@@ -148,6 +172,10 @@ func run(ipfsPath, watchPath string) error {
 
 func addTree(w *fsnotify.Watcher, root string) error {
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			log.Println(err)
+			return nil
+		}
 		isDir, err := IsDirectory(path)
 		if err != nil {
 			log.Println(err)
@@ -188,11 +216,7 @@ func IsHidden(path string) bool {
 
 func cmdCtx(node *core.IpfsNode, repoPath string) commands.Context {
 	return commands.Context{
-		Online:     true,
 		ConfigRoot: repoPath,
-		LoadConfig: func(path string) (*config.Config, error) {
-			return node.Repo.Config()
-		},
 		ConstructNode: func() (*core.IpfsNode, error) {
 			return node, nil
 		},

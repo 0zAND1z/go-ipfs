@@ -1,12 +1,17 @@
 # General performance debugging guidelines
 
-This is a document for helping debug go-ipfs. Please add to it if you can!
+This is a document for helping debug Kubo. Please add to it if you can!
 
-### Table of Contents
-- [Beginning](#beginning)
-- [Analysing the stack dump](#analysing-the-stack-dump)
-- [Analyzing the CPU Profile](#analyzing-the-cpu-profile)
-- [Other](#other)
+# Table of Contents
+
+- [General performance debugging guidelines](#general-performance-debugging-guidelines)
+- [Table of Contents](#table-of-contents)
+    - [Beginning](#beginning)
+    - [Analyzing the stack dump](#analyzing-the-stack-dump)
+    - [Analyzing the CPU Profile](#analyzing-the-cpu-profile)
+    - [Analyzing vars and memory statistics](#analyzing-vars-and-memory-statistics)
+    - [Tracing](#tracing)
+    - [Other](#other)
 
 ### Beginning
 
@@ -14,23 +19,26 @@ When you see ipfs doing something (using lots of CPU, memory, or otherwise
 being weird), the first thing you want to do is gather all the relevant
 profiling information.
 
+There's a command (`ipfs diag profile`) that will do this for you and
+bundle the results up into a zip file, ready to be attached to a bug report.
+
+If you feel intrepid, you can dump this information and investigate it yourself:
+
 - goroutine dump
   - `curl localhost:5001/debug/pprof/goroutine\?debug=2 > ipfs.stacks`
 - 30 second cpu profile
   - `curl localhost:5001/debug/pprof/profile > ipfs.cpuprof`
 - heap trace dump
   - `curl localhost:5001/debug/pprof/heap > ipfs.heap`
+- memory statistics (in json, see "memstats" object)
+  - `curl localhost:5001/debug/vars > ipfs.vars`
 - system information
   - `ipfs diag sys > ipfs.sysinfo`
 
-Bundle all that up and include a copy of the ipfs binary that you are running
-(having the exact same binary is important, it contains debug info).
 
-You can investigate yourself if you feel intrepid:
+### Analyzing the stack dump
 
-### Analysing the stack dump
-
-The first thing to look for is hung goroutines -- any goroutine thats been stuck
+The first thing to look for is hung goroutines -- any goroutine that's been stuck
 for over a minute will note that in the trace. It looks something like:
 
 ```
@@ -75,6 +83,9 @@ that goroutine in the middle of a short wait for something. If the wait time is
 over a few minutes, that either means that goroutine doesn't do much, or
 something is pretty wrong.
 
+If you're seeing a lot of goroutines, consider using
+[stackparse](https://github.com/whyrusleeping/stackparse) to filter, sort, and summarize them.
+
 ### Analyzing the CPU Profile
 
 The go team wrote an [excellent article on profiling go
@@ -84,9 +95,17 @@ about `go tool pprof`. My go-to method of analyzing these is to run the `web`
 command, which generates an SVG dotgraph and opens it in your browser. This is
 the quickest way to easily point out where the hot spots in the code are.
 
+### Analyzing vars and memory statistics
+
+The output is JSON formatted and includes badger store statistics, the command line run, and the output from Go's [runtime.ReadMemStats](https://golang.org/pkg/runtime/#ReadMemStats). The [MemStats](https://golang.org/pkg/runtime/#MemStats) has useful information about memory allocation and garbage collection.
+
+### Tracing
+
+Experimental tracing via OpenTelemetry suite of tools is available.
+See `tracing/doc.go` for more details.
+
 ### Other
 
-If you have any questions, or want us to analyze some weird go-ipfs behaviour,
+If you have any questions, or want us to analyze some weird kubo behaviour,
 just let us know, and be sure to include all the profiling information
 mentioned at the top.
-

@@ -1,16 +1,19 @@
 package objectcmd
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 
-	cmds "github.com/ipfs/go-ipfs/commands"
-	e "github.com/ipfs/go-ipfs/core/commands/e"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	"github.com/ipfs/go-ipfs/dagutils"
+	"github.com/ipfs/boxo/ipld/merkledag/dagutils"
+	"github.com/ipfs/boxo/path"
+	cmds "github.com/ipfs/go-ipfs-cmds"
 
-	cmdkit "gx/ipfs/QmPVqQHEfLpqK7JLCsUkyam7rhuV3MAeZ9gueQQCrBwCta/go-ipfs-cmdkit"
+	cmdenv "github.com/ipfs/kubo/core/commands/cmdenv"
+	"github.com/ipfs/kubo/core/commands/cmdutils"
+)
+
+const (
+	verboseOptionName = "verbose"
 )
 
 type Changes struct {
@@ -18,8 +21,9 @@ type Changes struct {
 }
 
 var ObjectDiffCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Display the diff between two ipfs objects.",
+	Status: cmds.Deprecated, // https://github.com/ipfs/kubo/issues/7936
+	Helptext: cmds.HelpText{
+		Tagline: "Display the diff between two IPFS objects.",
 		ShortDescription: `
 'ipfs object diff' is a command used to show the differences between
 two IPFS objects.`,
@@ -44,92 +48,80 @@ Example:
    Changed "bar" from QmNgd5cz2jNftnAHBhcRUGdtiaMzb5Rhjqd4etondHHST8 to QmRfFVsjSXkhFxrfWnLpMae2M4GBVsry6VAuYYcji5MiZb.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("obj_a", true, false, "Object to diff against."),
-		cmdkit.StringArg("obj_b", true, false, "Object to diff."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("obj_a", true, false, "Object to diff against."),
+		cmds.StringArg("obj_b", true, false, "Object to diff."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption("verbose", "v", "Print extra information."),
+	Options: []cmds.Option{
+		cmds.BoolOption(verboseOptionName, "v", "Print extra information."),
 	},
-	Run: func(req cmds.Request, res cmds.Response) {
-		api, err := req.InvocContext().GetApi()
+	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		a := req.Arguments()[0]
-		b := req.Arguments()[1]
-
-		pa, err := coreiface.ParsePath(a)
+		pa, err := cmdutils.PathOrCidPath(req.Arguments[0])
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		pb, err := coreiface.ParsePath(b)
+		pb, err := cmdutils.PathOrCidPath(req.Arguments[1])
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		changes, err := api.Object().Diff(req.Context(), pa, pb)
+		changes, err := api.Object().Diff(req.Context, pa, pb)
+		if err != nil {
+			return err
+		}
 
 		out := make([]*dagutils.Change, len(changes))
 		for i, change := range changes {
 			out[i] = &dagutils.Change{
-				Type: change.Type,
+				Type: dagutils.ChangeType(change.Type),
 				Path: change.Path,
 			}
 
-			if change.Before != nil {
-				out[i].Before = change.Before.Cid()
+			if (change.Before != path.ImmutablePath{}) {
+				out[i].Before = change.Before.RootCid()
 			}
 
-			if change.After != nil {
-				out[i].After = change.After.Cid()
+			if (change.After != path.ImmutablePath{}) {
+				out[i].After = change.After.RootCid()
 			}
 		}
 
-		res.SetOutput(&Changes{out})
+		return cmds.EmitOnce(res, &Changes{out})
 	},
 	Type: Changes{},
-	Marshalers: cmds.MarshalerMap{
-		cmds.Text: func(res cmds.Response) (io.Reader, error) {
-			v, err := unwrapOutput(res.Output())
-			if err != nil {
-				return nil, err
-			}
+	Encoders: cmds.EncoderMap{
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *Changes) error {
+			verbose, _ := req.Options[verboseOptionName].(bool)
 
-			verbose, _, _ := res.Request().Option("v").Bool()
-			changes, ok := v.(*Changes)
-			if !ok {
-				return nil, e.TypeErr(changes, v)
-			}
-
-			buf := new(bytes.Buffer)
-			for _, change := range changes.Changes {
+			for _, change := range out.Changes {
 				if verbose {
 					switch change.Type {
 					case dagutils.Add:
-						fmt.Fprintf(buf, "Added new link %q pointing to %s.\n", change.Path, change.After)
+						fmt.Fprintf(w, "Added new link %q pointing to %s.\n", change.Path, change.After)
 					case dagutils.Mod:
-						fmt.Fprintf(buf, "Changed %q from %s to %s.\n", change.Path, change.Before, change.After)
+						fmt.Fprintf(w, "Changed %q from %s to %s.\n", change.Path, change.Before, change.After)
 					case dagutils.Remove:
-						fmt.Fprintf(buf, "Removed link %q (was %s).\n", change.Path, change.Before)
+						fmt.Fprintf(w, "Removed link %q (was %s).\n", change.Path, change.Before)
 					}
 				} else {
 					switch change.Type {
 					case dagutils.Add:
-						fmt.Fprintf(buf, "+ %s %q\n", change.After, change.Path)
+						fmt.Fprintf(w, "+ %s %q\n", change.After, change.Path)
 					case dagutils.Mod:
-						fmt.Fprintf(buf, "~ %s %s %q\n", change.Before, change.After, change.Path)
+						fmt.Fprintf(w, "~ %s %s %q\n", change.Before, change.After, change.Path)
 					case dagutils.Remove:
-						fmt.Fprintf(buf, "- %s %q\n", change.Before, change.Path)
+						fmt.Fprintf(w, "- %s %q\n", change.Before, change.Path)
 					}
 				}
 			}
-			return buf, nil
-		},
+
+			return nil
+		}),
 	},
 }

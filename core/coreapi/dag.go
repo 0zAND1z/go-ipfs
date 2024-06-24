@@ -2,128 +2,73 @@ package coreapi
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"sync"
 
-	gopath "path"
+	dag "github.com/ipfs/boxo/ipld/merkledag"
+	pin "github.com/ipfs/boxo/pinning/pinner"
+	cid "github.com/ipfs/go-cid"
+	ipld "github.com/ipfs/go-ipld-format"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	caopts "github.com/ipfs/go-ipfs/core/coreapi/interface/options"
-	coredag "github.com/ipfs/go-ipfs/core/coredag"
-
-	ipld "gx/ipfs/QmUSyMZ8Vt4vTZr5HdDEgEfpwAXfQRuDdfCFTt7XBzhxpQ/go-ipld-format"
-	cid "gx/ipfs/Qmdu2AYUV7yMoVBQPxXNfe7FJcdx16kYtsx6jAPKWQYF1y/go-cid"
+	"github.com/ipfs/kubo/tracing"
 )
 
-type DagAPI CoreAPI
+type dagAPI struct {
+	ipld.DAGService
 
-type dagBatch struct {
-	api   *DagAPI
-	toPut []ipld.Node
-
-	lk sync.Mutex
+	core *CoreAPI
 }
 
-// Put inserts data using specified format and input encoding. Unless used with
-// `WithCodes` or `WithHash`, the defaults "dag-cbor" and "sha256" are used.
-// Returns the path of the inserted data.
-func (api *DagAPI) Put(ctx context.Context, src io.Reader, opts ...caopts.DagPutOption) (coreiface.ResolvedPath, error) {
-	nd, err := getNode(src, opts...)
+type pinningAdder CoreAPI
 
-	err = api.node.DAG.Add(ctx, nd)
-	if err != nil {
-		return nil, err
+func (adder *pinningAdder) Add(ctx context.Context, nd ipld.Node) error {
+	ctx, span := tracing.Span(ctx, "CoreAPI.PinningAdder", "Add", trace.WithAttributes(attribute.String("node", nd.String())))
+	defer span.End()
+	defer adder.blockstore.PinLock(ctx).Unlock(ctx)
+
+	if err := adder.dag.Add(ctx, nd); err != nil {
+		return err
 	}
 
-	return coreiface.IpldPath(nd.Cid()), nil
+	if err := adder.pinning.PinWithMode(ctx, nd.Cid(), pin.Recursive, ""); err != nil {
+		return err
+	}
+
+	return adder.pinning.Flush(ctx)
 }
 
-// Get resolves `path` using Unixfs resolver, returns the resolved Node.
-func (api *DagAPI) Get(ctx context.Context, path coreiface.Path) (ipld.Node, error) {
-	return api.core().ResolveNode(ctx, path)
-}
+func (adder *pinningAdder) AddMany(ctx context.Context, nds []ipld.Node) error {
+	ctx, span := tracing.Span(ctx, "CoreAPI.PinningAdder", "AddMany", trace.WithAttributes(attribute.Int("nodes.count", len(nds))))
+	defer span.End()
+	defer adder.blockstore.PinLock(ctx).Unlock(ctx)
 
-// Tree returns list of paths within a node specified by the path `p`.
-func (api *DagAPI) Tree(ctx context.Context, p coreiface.Path, opts ...caopts.DagTreeOption) ([]coreiface.Path, error) {
-	settings, err := caopts.DagTreeOptions(opts...)
-	if err != nil {
-		return nil, err
+	if err := adder.dag.AddMany(ctx, nds); err != nil {
+		return err
 	}
 
-	n, err := api.Get(ctx, p)
-	if err != nil {
-		return nil, err
-	}
-	paths := n.Tree("", settings.Depth)
-	out := make([]coreiface.Path, len(paths))
-	for n, p2 := range paths {
-		out[n], err = coreiface.ParsePath(gopath.Join(p.String(), p2))
-		if err != nil {
-			return nil, err
+	cids := cid.NewSet()
+
+	for _, nd := range nds {
+		c := nd.Cid()
+		if cids.Visit(c) {
+			if err := adder.pinning.PinWithMode(ctx, c, pin.Recursive, ""); err != nil {
+				return err
+			}
 		}
 	}
 
-	return out, nil
+	return adder.pinning.Flush(ctx)
 }
 
-// Batch creates new DagBatch
-func (api *DagAPI) Batch(ctx context.Context) coreiface.DagBatch {
-	return &dagBatch{api: api}
+func (api *dagAPI) Pinning() ipld.NodeAdder {
+	return (*pinningAdder)(api.core)
 }
 
-// Put inserts data using specified format and input encoding. Unless used with
-// `WithCodes` or `WithHash`, the defaults "dag-cbor" and "sha256" are used.
-// Returns the path of the inserted data.
-func (b *dagBatch) Put(ctx context.Context, src io.Reader, opts ...caopts.DagPutOption) (coreiface.ResolvedPath, error) {
-	nd, err := getNode(src, opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	b.lk.Lock()
-	b.toPut = append(b.toPut, nd)
-	b.lk.Unlock()
-
-	return coreiface.IpldPath(nd.Cid()), nil
+func (api *dagAPI) Session(ctx context.Context) ipld.NodeGetter {
+	return dag.NewSession(ctx, api.DAGService)
 }
 
-// Commit commits nodes to the datastore and announces them to the network
-func (b *dagBatch) Commit(ctx context.Context) error {
-	b.lk.Lock()
-	defer b.lk.Unlock()
-	defer func() {
-		b.toPut = nil
-	}()
-
-	return b.api.node.DAG.AddMany(ctx, b.toPut)
-}
-
-func getNode(src io.Reader, opts ...caopts.DagPutOption) (ipld.Node, error) {
-	settings, err := caopts.DagPutOptions(opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	codec, ok := cid.CodecToStr[settings.Codec]
-	if !ok {
-		return nil, fmt.Errorf("invalid codec %d", settings.Codec)
-	}
-
-	nds, err := coredag.ParseInputs(settings.InputEnc, codec, src, settings.MhType, settings.MhLength)
-	if err != nil {
-		return nil, err
-	}
-	if len(nds) == 0 {
-		return nil, fmt.Errorf("no node returned from ParseInputs")
-	}
-	if len(nds) != 1 {
-		return nil, fmt.Errorf("got more that one node from ParseInputs")
-	}
-
-	return nds[0], nil
-}
-
-func (api *DagAPI) core() coreiface.CoreAPI {
-	return (*CoreAPI)(api)
-}
+var (
+	_ ipld.DAGService  = (*dagAPI)(nil)
+	_ dag.SessionMaker = (*dagAPI)(nil)
+)

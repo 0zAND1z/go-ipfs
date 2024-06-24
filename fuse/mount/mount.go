@@ -8,15 +8,15 @@ import (
 	"runtime"
 	"time"
 
-	logging "gx/ipfs/QmRREK2CAZ5Re2Bd9zZFG6FeYDppUWt5cMgsoUEp3ktgSr/go-log"
-	goprocess "gx/ipfs/QmSF8fPo3jgVBAy8fpdjjYqgG87dkJgUprRBHRd2tmfgpP/goprocess"
+	logging "github.com/ipfs/go-log"
+	goprocess "github.com/jbenet/goprocess"
 )
 
 var log = logging.Logger("mount")
 
 var MountTimeout = time.Second * 5
 
-// Mount represents a filesystem mount
+// Mount represents a filesystem mount.
 type Mount interface {
 	// MountPoint is the path at which this mount is mounted
 	MountPoint() string
@@ -36,16 +36,11 @@ type Mount interface {
 // It does so by calling diskutil or fusermount directly.
 func ForceUnmount(m Mount) error {
 	point := m.MountPoint()
-	log.Warningf("Force-Unmounting %s...", point)
+	log.Warnf("Force-Unmounting %s...", point)
 
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("diskutil", "umount", "force", point)
-	case "linux":
-		cmd = exec.Command("fusermount", "-u", point)
-	default:
-		return fmt.Errorf("unmount: unimplemented")
+	cmd, err := UnmountCmd(point)
+	if err != nil {
+		return err
 	}
 
 	errc := make(chan error, 1)
@@ -66,6 +61,19 @@ func ForceUnmount(m Mount) error {
 		return fmt.Errorf("umount timeout")
 	case err := <-errc:
 		return err
+	}
+}
+
+// UnmountCmd creates an exec.Cmd that is GOOS-specific
+// for unmount a FUSE mount.
+func UnmountCmd(point string) (*exec.Cmd, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("diskutil", "umount", "force", point), nil
+	case "linux":
+		return exec.Command("fusermount", "-u", point), nil
+	default:
+		return nil, fmt.Errorf("unmount: unimplemented")
 	}
 }
 
@@ -90,7 +98,7 @@ type closer struct {
 }
 
 func (c *closer) Close() error {
-	log.Warning(" (c *closer) Close(),", c.M.MountPoint())
+	log.Warn(" (c *closer) Close(),", c.M.MountPoint())
 	return c.M.Unmount()
 }
 

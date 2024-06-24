@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	cmds "gx/ipfs/QmUQb3xtNzkQCgTj2NjaqcJZNv2nfSSub2QAdy9DtQMRBT/go-ipfs-cmds"
+	cmds "github.com/ipfs/go-ipfs-cmds"
 )
 
 func collectPaths(prefix string, cmd *cmds.Command, out map[string]struct{}) {
@@ -15,57 +15,6 @@ func collectPaths(prefix string, cmd *cmds.Command, out map[string]struct{}) {
 	}
 }
 
-func TestROCommands(t *testing.T) {
-	list := []string{
-		"/block",
-		"/block/get",
-		"/block/stat",
-		"/cat",
-		"/commands",
-		"/dag",
-		"/dag/get",
-		"/dag/resolve",
-		"/dns",
-		"/get",
-		"/ls",
-		"/name",
-		"/name/resolve",
-		"/object",
-		"/object/data",
-		"/object/get",
-		"/object/links",
-		"/object/stat",
-		"/refs",
-		"/resolve",
-		"/version",
-	}
-
-	cmdSet := make(map[string]struct{})
-	collectPaths("", RootRO, cmdSet)
-
-	for _, path := range list {
-		if _, ok := cmdSet[path]; !ok {
-			t.Errorf("%q not in result", path)
-		} else {
-			delete(cmdSet, path)
-		}
-	}
-
-	for path := range cmdSet {
-		t.Errorf("%q in result but shouldn't be", path)
-	}
-
-	for _, path := range list {
-		path = path[1:] // remove leading slash
-		split := strings.Split(path, "/")
-		sub, err := RootRO.Get(split)
-		if err != nil {
-			t.Errorf("error getting subcommand %q: %v", path, err)
-		} else if sub == nil {
-			t.Errorf("subcommand %q is nil even though there was no error", path)
-		}
-	}
-}
 func TestCommands(t *testing.T) {
 	list := []string{
 		"/add",
@@ -73,7 +22,6 @@ func TestCommands(t *testing.T) {
 		"/bitswap/ledger",
 		"/bitswap/reprovide",
 		"/bitswap/stat",
-		"/bitswap/unwant",
 		"/bitswap/wantlist",
 		"/block",
 		"/block/get",
@@ -87,32 +35,49 @@ func TestCommands(t *testing.T) {
 		"/bootstrap/rm",
 		"/bootstrap/rm/all",
 		"/cat",
+		"/cid",
+		"/cid/base32",
+		"/cid/bases",
+		"/cid/codecs",
+		"/cid/format",
+		"/cid/hashes",
 		"/commands",
+		"/commands/completion",
+		"/commands/completion/bash",
+		"/commands/completion/fish",
+		"/commands/completion/zsh",
 		"/config",
 		"/config/edit",
-		"/config/replace",
-		"/config/show",
 		"/config/profile",
 		"/config/profile/apply",
+		"/config/replace",
+		"/config/show",
 		"/dag",
+		"/dag/export",
 		"/dag/get",
+		"/dag/import",
 		"/dag/put",
 		"/dag/resolve",
+		"/dag/stat",
 		"/dht",
-		"/dht/findpeer",
+		"/dht/query",
 		"/dht/findprovs",
+		"/dht/findpeer",
 		"/dht/get",
 		"/dht/provide",
 		"/dht/put",
-		"/dht/query",
+		"/routing",
+		"/routing/put",
+		"/routing/get",
+		"/routing/findpeer",
+		"/routing/findprovs",
+		"/routing/provide",
 		"/diag",
 		"/diag/cmds",
 		"/diag/cmds/clear",
 		"/diag/cmds/set-time",
+		"/diag/profile",
 		"/diag/sys",
-		"/dns",
-		"/file",
-		"/file/ls",
 		"/files",
 		"/files/chcid",
 		"/files/cp",
@@ -123,30 +88,41 @@ func TestCommands(t *testing.T) {
 		"/files/read",
 		"/files/rm",
 		"/files/stat",
+		"/files/write",
 		"/filestore",
 		"/filestore/dups",
 		"/filestore/ls",
 		"/filestore/verify",
-		"/files/write",
 		"/get",
 		"/id",
 		"/key",
+		"/key/export",
 		"/key/gen",
+		"/key/import",
 		"/key/list",
 		"/key/rename",
 		"/key/rm",
+		"/key/rotate",
+		"/key/sign",
+		"/key/verify",
 		"/log",
 		"/log/level",
 		"/log/ls",
 		"/log/tail",
 		"/ls",
 		"/mount",
+		"/multibase",
+		"/multibase/decode",
+		"/multibase/encode",
+		"/multibase/transcode",
+		"/multibase/list",
 		"/name",
+		"/name/inspect",
 		"/name/publish",
 		"/name/pubsub",
+		"/name/pubsub/cancel",
 		"/name/pubsub/state",
 		"/name/pubsub/subs",
-		"/name/pubsub/cancel",
 		"/name/resolve",
 		"/object",
 		"/object/data",
@@ -162,21 +138,28 @@ func TestCommands(t *testing.T) {
 		"/object/put",
 		"/object/stat",
 		"/p2p",
-		"/p2p/listener",
-		"/p2p/listener/close",
-		"/p2p/listener/ls",
-		"/p2p/listener/open",
+		"/p2p/close",
+		"/p2p/forward",
+		"/p2p/listen",
+		"/p2p/ls",
 		"/p2p/stream",
 		"/p2p/stream/close",
-		"/p2p/stream/dial",
 		"/p2p/stream/ls",
 		"/pin",
 		"/pin/add",
-		"/ping",
 		"/pin/ls",
+		"/pin/remote",
+		"/pin/remote/add",
+		"/pin/remote/ls",
+		"/pin/remote/rm",
+		"/pin/remote/service",
+		"/pin/remote/service/add",
+		"/pin/remote/service/ls",
+		"/pin/remote/service/rm",
 		"/pin/rm",
 		"/pin/update",
 		"/pin/verify",
+		"/ping",
 		"/pubsub",
 		"/pubsub/ls",
 		"/pubsub/peers",
@@ -185,16 +168,19 @@ func TestCommands(t *testing.T) {
 		"/refs",
 		"/refs/local",
 		"/repo",
-		"/repo/fsck",
 		"/repo/gc",
+		"/repo/migrate",
 		"/repo/stat",
 		"/repo/verify",
 		"/repo/version",
+		"/repo/ls",
 		"/resolve",
 		"/shutdown",
 		"/stats",
 		"/stats/bitswap",
 		"/stats/bw",
+		"/stats/dht",
+		"/stats/provide",
 		"/stats/repo",
 		"/swarm",
 		"/swarm/addrs",
@@ -206,13 +192,14 @@ func TestCommands(t *testing.T) {
 		"/swarm/filters/add",
 		"/swarm/filters/rm",
 		"/swarm/peers",
-		"/tar",
-		"/tar/add",
-		"/tar/cat",
+		"/swarm/peering",
+		"/swarm/peering/add",
+		"/swarm/peering/ls",
+		"/swarm/peering/rm",
+		"/swarm/resources",
 		"/update",
-		"/urlstore",
-		"/urlstore/add",
 		"/version",
+		"/version/deps",
 	}
 
 	cmdSet := make(map[string]struct{})

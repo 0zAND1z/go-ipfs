@@ -3,262 +3,171 @@ package objectcmd
 import (
 	"fmt"
 	"io"
-	"strings"
 
-	oldcmds "github.com/ipfs/go-ipfs/commands"
-	lgc "github.com/ipfs/go-ipfs/commands/legacy"
-	e "github.com/ipfs/go-ipfs/core/commands/e"
-	coreiface "github.com/ipfs/go-ipfs/core/coreapi/interface"
-	"github.com/ipfs/go-ipfs/core/coreapi/interface/options"
+	cmds "github.com/ipfs/go-ipfs-cmds"
+	"github.com/ipfs/kubo/core/commands/cmdenv"
+	"github.com/ipfs/kubo/core/commands/cmdutils"
 
-	cmdkit "gx/ipfs/QmPVqQHEfLpqK7JLCsUkyam7rhuV3MAeZ9gueQQCrBwCta/go-ipfs-cmdkit"
-	cmds "gx/ipfs/QmUQb3xtNzkQCgTj2NjaqcJZNv2nfSSub2QAdy9DtQMRBT/go-ipfs-cmds"
+	"github.com/ipfs/kubo/core/coreiface/options"
 )
 
 var ObjectPatchCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Create a new merkledag object based on an existing one.",
+	Status: cmds.Deprecated, // https://github.com/ipfs/kubo/issues/7936
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated way to create a new merkledag object based on an existing one. Use MFS with 'files cp|rm' instead.",
 		ShortDescription: `
 'ipfs object patch <root> <cmd> <args>' is a plumbing command used to
-build custom DAG objects. It mutates objects, creating new objects as a
+build custom dag-pb objects. It mutates objects, creating new objects as a
 result. This is the Merkle-DAG version of modifying an object.
+
+DEPRECATED and provided for legacy reasons.
+For modern use cases, use MFS with 'files' commands: 'ipfs files --help'.
+
+  $ ipfs files cp /ipfs/QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn /some-dir
+  $ ipfs files cp /ipfs/Qmayz4F4UzqcAMitTzU4zCSckDofvxstDuj3y7ajsLLEVs /some-dir/added-file.jpg
+  $ ipfs files stat --hash /some-dir
+
+  The above will add 'added-file.jpg' to the directory placed under /some-dir
+  and the CID of updated directory is returned by 'files stat'
+
+  'files cp' does not download the data, only the root block, which makes it
+  possible to build arbitrary directory trees without fetching them in full to
+  the local node.
 `,
 	},
-	Arguments: []cmdkit.Argument{},
+	Arguments: []cmds.Argument{},
 	Subcommands: map[string]*cmds.Command{
-		"append-data": patchAppendDataCmd,
-		"add-link":    lgc.NewCommand(patchAddLinkCmd),
-		"rm-link":     lgc.NewCommand(patchRmLinkCmd),
-		"set-data":    lgc.NewCommand(patchSetDataCmd),
+		"append-data": RemovedObjectCmd,
+		"add-link":    patchAddLinkCmd,
+		"rm-link":     patchRmLinkCmd,
+		"set-data":    RemovedObjectCmd,
+	},
+	Options: []cmds.Option{
+		cmdutils.AllowBigBlockOption,
 	},
 }
 
-func objectMarshaler(res oldcmds.Response) (io.Reader, error) {
-	v, err := unwrapOutput(res.Output())
-	if err != nil {
-		return nil, err
-	}
-
-	o, ok := v.(*Object)
-	if !ok {
-		return nil, e.TypeErr(o, v)
-	}
-
-	return strings.NewReader(o.Hash + "\n"), nil
-}
-
-var patchAppendDataCmd = &cmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Append data to the data segment of a dag node.",
+var patchRmLinkCmd = &cmds.Command{
+	Status: cmds.Deprecated, // https://github.com/ipfs/kubo/issues/7936
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated way to remove a link from dag-pb object.",
 		ShortDescription: `
-Append data to what already exists in the data segment in the given object.
+Remove a Merkle-link from the given object and return the hash of the result.
 
-Example:
-
-	$ echo "hello" | ipfs object patch $HASH append-data
-
-NOTE: This does not append data to a file - it modifies the actual raw
-data within an object. Objects have a max size of 1MB and objects larger than
-the limit will not be respected by the network.
+DEPRECATED and provided for legacy reasons. Use 'files rm' instead.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("root", true, false, "The hash of the node to modify."),
-		cmdkit.FileArg("data", true, false, "Data to append.").EnableStdin(),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("root", true, false, "The hash of the node to modify."),
+		cmds.StringArg("name", true, false, "Name of the link to remove."),
 	},
-	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) {
-		api, err := GetApi(env)
+	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
-			re.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		root, err := coreiface.ParsePath(req.Arguments[0])
+		root, err := cmdutils.PathOrCidPath(req.Arguments[0])
 		if err != nil {
-			re.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		data, err := req.Files.NextFile()
+		name := req.Arguments[1]
+		p, err := api.Object().RmLink(req.Context, root, name)
 		if err != nil {
-			re.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		p, err := api.Object().AppendData(req.Context, root, data)
-		if err != nil {
-			re.SetError(err, cmdkit.ErrNormal)
-			return
+		if err := cmdutils.CheckCIDSize(req, p.RootCid(), api.Dag()); err != nil {
+			return err
 		}
 
-		cmds.EmitOnce(re, &Object{Hash: p.Cid().String()})
+		return cmds.EmitOnce(res, &Object{Hash: p.RootCid().String()})
 	},
 	Type: Object{},
 	Encoders: cmds.EncoderMap{
-		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, obj *Object) error {
-			_, err := fmt.Fprintln(w, obj.Hash)
-			return err
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *Object) error {
+			fmt.Fprintln(w, out.Hash)
+			return nil
 		}),
 	},
 }
 
-var patchSetDataCmd = &oldcmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Set the data field of an IPFS object.",
-		ShortDescription: `
-Set the data of an IPFS object from stdin or with the contents of a file.
+const (
+	createOptionName = "create"
+)
 
-Example:
-
-    $ echo "my data" | ipfs object patch $MYHASH set-data
-`,
-	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("root", true, false, "The hash of the node to modify."),
-		cmdkit.FileArg("data", true, false, "The data to set the object to.").EnableStdin(),
-	},
-	Run: func(req oldcmds.Request, res oldcmds.Response) {
-		api, err := req.InvocContext().GetApi()
-
-		root, err := coreiface.ParsePath(req.StringArguments()[0])
-		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
-		}
-
-		data, err := req.Files().NextFile()
-		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
-		}
-
-		p, err := api.Object().SetData(req.Context(), root, data)
-		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
-		}
-
-		res.SetOutput(&Object{Hash: p.Cid().String()})
-	},
-	Type: Object{},
-	Marshalers: oldcmds.MarshalerMap{
-		oldcmds.Text: objectMarshaler,
-	},
-}
-
-var patchRmLinkCmd = &oldcmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Remove a link from an object.",
-		ShortDescription: `
-Removes a link by the given name from root.
-`,
-	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("root", true, false, "The hash of the node to modify."),
-		cmdkit.StringArg("link", true, false, "Name of the link to remove."),
-	},
-	Run: func(req oldcmds.Request, res oldcmds.Response) {
-		api, err := req.InvocContext().GetApi()
-		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
-		}
-
-		root, err := coreiface.ParsePath(req.Arguments()[0])
-		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
-		}
-
-		link := req.Arguments()[1]
-		p, err := api.Object().RmLink(req.Context(), root, link)
-		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
-		}
-
-		res.SetOutput(&Object{Hash: p.Cid().String()})
-	},
-	Type: Object{},
-	Marshalers: oldcmds.MarshalerMap{
-		oldcmds.Text: objectMarshaler,
-	},
-}
-
-var patchAddLinkCmd = &oldcmds.Command{
-	Helptext: cmdkit.HelpText{
-		Tagline: "Add a link to a given object.",
+var patchAddLinkCmd = &cmds.Command{
+	Status: cmds.Deprecated, // https://github.com/ipfs/kubo/issues/7936
+	Helptext: cmds.HelpText{
+		Tagline: "Deprecated way to add a link to a given dag-pb.",
 		ShortDescription: `
 Add a Merkle-link to the given object and return the hash of the result.
 
-Example:
+DEPRECATED and provided for legacy reasons.
 
-    $ EMPTY_DIR=$(ipfs object new unixfs-dir)
-    $ BAR=$(echo "bar" | ipfs add -q)
-    $ ipfs object patch $EMPTY_DIR add-link foo $BAR
+Use MFS and 'files' commands instead:
 
-This takes an empty directory, and adds a link named 'foo' under it, pointing
-to a file containing 'bar', and returns the hash of the new object.
+  $ ipfs files cp /ipfs/QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn /some-dir
+  $ ipfs files cp /ipfs/Qmayz4F4UzqcAMitTzU4zCSckDofvxstDuj3y7ajsLLEVs /some-dir/added-file.jpg
+  $ ipfs files stat --hash /some-dir
+
+  The above will add 'added-file.jpg' to the directory placed under /some-dir
+  and the CID of updated directory is returned by 'files stat'
+
+  'files cp' does not download the data, only the root block, which makes it
+  possible to build arbitrary directory trees without fetching them in full to
+  the local node.
 `,
 	},
-	Arguments: []cmdkit.Argument{
-		cmdkit.StringArg("root", true, false, "The hash of the node to modify."),
-		cmdkit.StringArg("name", true, false, "Name of link to create."),
-		cmdkit.StringArg("ref", true, false, "IPFS object to add link to."),
+	Arguments: []cmds.Argument{
+		cmds.StringArg("root", true, false, "The hash of the node to modify."),
+		cmds.StringArg("name", true, false, "Name of link to create."),
+		cmds.StringArg("ref", true, false, "IPFS object to add link to."),
 	},
-	Options: []cmdkit.Option{
-		cmdkit.BoolOption("create", "p", "Create intermediary nodes."),
+	Options: []cmds.Option{
+		cmds.BoolOption(createOptionName, "p", "Create intermediary nodes."),
 	},
-	Run: func(req oldcmds.Request, res oldcmds.Response) {
-		api, err := req.InvocContext().GetApi()
+	Run: func(req *cmds.Request, res cmds.ResponseEmitter, env cmds.Environment) error {
+		api, err := cmdenv.GetApi(env, req)
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		root, err := coreiface.ParsePath(req.Arguments()[0])
+		root, err := cmdutils.PathOrCidPath(req.Arguments[0])
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		name := req.Arguments()[1]
+		name := req.Arguments[1]
 
-		child, err := coreiface.ParsePath(req.Arguments()[2])
+		child, err := cmdutils.PathOrCidPath(req.Arguments[2])
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		create, _, err := req.Option("create").Bool()
+		create, _ := req.Options[createOptionName].(bool)
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		p, err := api.Object().AddLink(req.Context(), root, name, child,
+		p, err := api.Object().AddLink(req.Context, root, name, child,
 			options.Object.Create(create))
 		if err != nil {
-			res.SetError(err, cmdkit.ErrNormal)
-			return
+			return err
 		}
 
-		res.SetOutput(&Object{Hash: p.Cid().String()})
+		if err := cmdutils.CheckCIDSize(req, p.RootCid(), api.Dag()); err != nil {
+			return err
+		}
+
+		return cmds.EmitOnce(res, &Object{Hash: p.RootCid().String()})
 	},
 	Type: Object{},
-	Marshalers: oldcmds.MarshalerMap{
-		oldcmds.Text: objectMarshaler,
+	Encoders: cmds.EncoderMap{
+		cmds.Text: cmds.MakeTypedEncoder(func(req *cmds.Request, w io.Writer, out *Object) error {
+			fmt.Fprintln(w, out.Hash)
+			return nil
+		}),
 	},
-}
-
-// TODO: fix import loop with core/commands so we don't need that
-// COPIED FROM ONE LEVEL UP
-// GetApi extracts CoreAPI instance from the environment.
-func GetApi(env cmds.Environment) (coreiface.CoreAPI, error) {
-	ctx, ok := env.(*oldcmds.Context)
-	if !ok {
-		return nil, fmt.Errorf("expected env to be of type %T, got %T", ctx, env)
-	}
-
-	return ctx.GetApi()
 }

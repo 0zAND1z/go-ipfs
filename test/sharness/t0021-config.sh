@@ -75,6 +75,17 @@ test_profile_apply_revert() {
   '
 }
 
+test_profile_apply_dry_run_not_alter() {
+  profile=$1
+
+  test_expect_success "'ipfs config profile apply ${profile} --dry-run' doesn't alter config" '
+    cat "$IPFS_PATH/config" >expected &&
+    ipfs config profile apply '${profile}' --dry-run &&
+    cat "$IPFS_PATH/config" >actual &&
+    test_cmp expected actual
+  '
+}
+
 test_config_cmd() {
   test_config_cmd_set "beep" "boop"
   test_config_cmd_set "beep1" "boop2"
@@ -97,6 +108,13 @@ test_config_cmd() {
     grep "\"beep1\": \"boop2\"," actual &&
     grep "\"beep2\": false," actual &&
     grep "\"beep3\": false," actual
+  '
+
+  test_expect_success "'ipfs config show --config-file' works" '
+    mv "$IPFS_PATH/config" "$IPFS_PATH/config-moved" &&
+    ipfs config --config-file "$IPFS_PATH/config-moved" show >moved &&
+    test_cmp moved actual &&
+    mv "$IPFS_PATH/config-moved" "$IPFS_PATH/config"
   '
 
   test_expect_success "setup for config replace test" '
@@ -198,7 +216,7 @@ test_config_cmd() {
 
   test_expect_success "'ipfs config Swarm.AddrFilters' looks good with server profile" '
     ipfs config Swarm.AddrFilters > actual_config &&
-    test $(cat actual_config | wc -l) = 17
+    test $(cat actual_config | wc -l) = 18
   '
 
   test_expect_success "'ipfs config profile apply local-discovery' works" '
@@ -219,6 +237,47 @@ test_config_cmd() {
 
   # need to do this in reverse as the test profile is already applied in sharness
   test_profile_apply_revert default-networking test
+
+  test_profile_apply_dry_run_not_alter server
+
+  test_profile_apply_dry_run_not_alter local-discovery
+
+  test_profile_apply_dry_run_not_alter test
+
+  test_expect_success "'ipfs config profile apply local-discovery --dry-run' looks good with different profile info" '
+    ipfs config profile apply local-discovery --dry-run > diff_info &&
+    test `grep "DisableNatPortMap" diff_info | wc -l` = 2
+  '
+
+  test_expect_success "'ipfs config profile apply server --dry-run' looks good with same profile info" '
+    ipfs config profile apply server --dry-run > diff_info &&
+    test `grep "DisableNatPortMap" diff_info | wc -l` = 1
+  '
+
+  test_expect_success "'ipfs config profile apply server' looks good with same profile info" '
+    ipfs config profile apply server > diff_info &&
+    test `grep "DisableNatPortMap" diff_info | wc -l` = 1
+  '
+
+  test_expect_success "'ipfs config profile apply local-discovery' looks good with different profile info" '
+    ipfs config profile apply local-discovery > diff_info &&
+    test `grep "DisableNatPortMap" diff_info | wc -l` = 2
+  '
+
+  test_expect_success "'ipfs config profile apply test' looks good with different profile info" '
+    ipfs config profile apply test > diff_info &&
+    test `grep "DisableNatPortMap" diff_info | wc -l` = 2
+  '
+
+  test_expect_success "'ipfs config profile apply test --dry-run' doesn't include privkey" '
+    ipfs config profile apply test --dry-run > show_config &&
+    test_expect_code 1 grep PrivKey show_config
+  '
+
+  test_expect_success "'ipfs config profile apply test' doesn't include privkey" '
+    ipfs config profile apply test > show_config &&
+    test_expect_code 1 grep PrivKey show_config
+  '
 
   # won't work as it changes datastore definition, which makes ipfs not launch
   # without converting first
